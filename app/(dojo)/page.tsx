@@ -52,21 +52,31 @@ export default async function Dashboard() {
     <div className="space-y-5">
       {/* Active goal — the point of the dojo */}
       {goal ? (
-        <section className="card relative overflow-hidden p-5">
-          <div
-            className="absolute inset-y-0 left-0 w-[3px]"
-            style={{ background: "var(--psi)" }}
-          />
+        <section
+          className="relative overflow-hidden border p-5"
+          style={{
+            borderColor: "rgba(255,207,63,0.42)",
+            background: "linear-gradient(90deg, rgba(36,29,8,0.75), rgba(8,18,14,0.6))",
+          }}
+        >
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="font-data text-[10px] uppercase tracking-[0.25em] text-[var(--psi)]">
+            <div className="flex items-center gap-4">
+              <span
+                className="font-data flex h-[30px] w-[30px] flex-none items-center justify-center rounded-full border-2 text-[14px] font-semibold"
+                style={{ borderColor: "var(--gold)", color: "var(--gold)" }}
+              >
+                ◎
+              </span>
+              <div>
+              <p className="font-data text-[10px] uppercase tracking-[0.2em] text-[var(--gold)]">
                 Objetivo activo · {goal.area}
               </p>
-              <h2 className="mt-1 text-lg font-semibold tracking-tight">{goal.title}</h2>
+              <h2 className="mt-1 text-lg font-semibold tracking-tight" style={{ color: "#f7ecd0" }}>{goal.title}</h2>
               <p className="mt-0.5 text-[12px] text-[var(--ink-dim)]">
                 Meta: {goal.metric_key} {goal.comparator} {goal.target_value} · necesitas{" "}
                 {goal.streak_required} partidas seguidas
               </p>
+              </div>
             </div>
             <div className="text-right">
               <p className="font-data text-4xl font-semibold tabular-nums">

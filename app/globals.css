@@ -1,28 +1,31 @@
 @import "tailwindcss";
 
 :root {
-  /* The war room: a dark field lit by the screen. */
-  --void: #0a0e14;          /* page — deep space */
-  --nebula: #10161f;        /* raised surface */
-  --hud: #161e2a;           /* higher surface: dropdowns, hover */
-  --hud-bright: #1c2634;    /* highest: active controls */
+  /* The dojo HUD: phosphor green over near-black, gold for the operator. */
+  --void: #0a0f0d;          /* page — dark moss black */
+  --nebula: #081410;        /* raised surface */
+  --hud: #0d1f18;           /* higher surface: dropdowns, hover */
+  --hud-bright: #12291f;    /* highest: active controls */
 
-  --grid-line: rgba(148, 180, 220, 0.10);       /* default border */
-  --grid-line-soft: rgba(148, 180, 220, 0.06);
-  --grid-line-strong: rgba(148, 180, 220, 0.22);
+  --grid-line: rgba(84, 232, 150, 0.18);        /* default border */
+  --grid-line-soft: rgba(84, 232, 150, 0.10);
+  --grid-line-strong: rgba(84, 232, 150, 0.32);
 
-  --ink: #e8eef6;           /* primary text */
-  --ink-dim: #9aa8bb;       /* secondary */
-  --ink-faint: #5e6b7e;     /* tertiary / metadata */
-  --ink-ghost: #3d4756;     /* disabled, placeholders */
+  --ink: #dffaea;           /* primary text */
+  --ink-dim: #9fc0ae;       /* secondary */
+  --ink-faint: #648573;     /* tertiary / metadata */
+  --ink-ghost: #40564a;     /* disabled, placeholders */
 
-  --psi: #35d0ba;           /* accent — protoss psi glow */
-  --psi-dim: rgba(53, 208, 186, 0.14);
+  --psi: #54e896;           /* accent — HUD phosphor green */
+  --psi-dim: rgba(84, 232, 150, 0.13);
+  --gold: #ffcf3f;          /* operator accent — playhead, coach, CTAs */
+  --gold-dim: rgba(255, 207, 63, 0.13);
+  --gold-line: rgba(255, 207, 63, 0.4);
   --minerals: #4da3ff;      /* links, info */
   --vespene: #58c26e;       /* success / win */
   --vespene-dim: rgba(88, 194, 110, 0.14);
-  --supply-red: #e25555;    /* danger / loss */
-  --supply-red-dim: rgba(226, 85, 85, 0.13);
+  --supply-red: #e0534f;    /* danger / loss */
+  --supply-red-dim: rgba(224, 83, 79, 0.13);
   --energy: #e0a93e;        /* warning */
   --energy-dim: rgba(224, 169, 62, 0.13);
 
@@ -39,7 +42,9 @@
 html { background: var(--void); }
 
 body {
-  background: var(--void);
+  background:
+    radial-gradient(1200px 700px at 22% 0%, #0b1a15, transparent 60%),
+    var(--void);
   color: var(--ink);
   font-family: var(--font-display);
   font-size: 14px;
@@ -47,14 +52,43 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-::selection { background: var(--psi-dim); color: var(--psi); }
+/* CRT scanlines, barely there. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.012) 0 1px,
+    transparent 1px 3px
+  );
+}
+
+::selection { background: var(--gold-dim); color: var(--gold); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: rgba(84, 232, 150, 0.25); border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
 
 .font-data { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
 
 .card {
-  background: var(--nebula);
+  background: rgba(8, 20, 16, 0.68);
   border: 1px solid var(--grid-line);
-  border-radius: 10px;
+  border-radius: 2px;
+  backdrop-filter: blur(6px);
+}
+
+/* Section label inside a card — mono, tracked out, phosphor. */
+.hud-label {
+  font-family: var(--font-data);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--psi);
 }
 
 .race-P { color: var(--protoss); }
@@ -62,9 +96,9 @@ body {
 .race-Z { color: var(--zerg); }
 
 input, select, textarea {
-  background: #0c1118;
+  background: rgba(4, 10, 8, 0.85);
   border: 1px solid var(--grid-line);
-  border-radius: 7px;
+  border-radius: 2px;
   color: var(--ink);
   padding: 7px 11px;
   font-size: 13px;
@@ -74,7 +108,7 @@ input, select, textarea {
 input:hover, select:hover, textarea:hover { border-color: var(--grid-line-strong); }
 input:focus, select:focus, textarea:focus {
   border-color: var(--psi);
-  box-shadow: 0 0 0 3px rgba(53, 208, 186, 0.12);
+  box-shadow: 0 0 0 3px rgba(84, 232, 150, 0.12);
 }
 input::placeholder, textarea::placeholder { color: var(--ink-ghost); }
 
@@ -84,7 +118,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-ghost); }
   gap: 7px;
   background: var(--hud);
   border: 1px solid var(--grid-line);
-  border-radius: 7px;
+  border-radius: 2px;
   color: var(--ink);
   padding: 7px 14px;
   font-size: 13px;
@@ -97,7 +131,40 @@ input::placeholder, textarea::placeholder { color: var(--ink-ghost); }
 .btn:disabled { color: var(--ink-ghost); cursor: default; }
 .btn-psi {
   background: var(--psi-dim);
-  border-color: rgba(53, 208, 186, 0.35);
+  border-color: rgba(84, 232, 150, 0.35);
   color: var(--psi);
 }
-.btn-psi:hover { background: rgba(53, 208, 186, 0.22); border-color: var(--psi); }
+.btn-psi:hover { background: rgba(84, 232, 150, 0.22); border-color: var(--psi); }
+.btn-gold {
+  background: var(--gold-dim);
+  border-color: rgba(255, 207, 63, 0.55);
+  color: var(--gold);
+}
+.btn-gold:hover { background: rgba(255, 207, 63, 0.22); border-color: var(--gold); }
+
+/* Small mono toggle chips (chart modes, metrics, speeds). */
+.chip {
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--ink-faint);
+  background: transparent;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.chip:hover { color: var(--ink-dim); }
+.chip-on {
+  color: var(--gold);
+  background: var(--gold-dim);
+  border-color: var(--gold-line);
+}
+
+@keyframes pulseRing {
+  0% { transform: scale(0.6); opacity: 0.9; }
+  100% { transform: scale(1.9); opacity: 0; }
+}

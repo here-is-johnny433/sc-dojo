@@ -17,24 +17,48 @@ export default async function ReplayPage({ params }: { params: Promise<{ id: str
   const resim = await resimStatus(id);
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0">
           <Link
             href={`/games/${game.id}`}
-            className="font-data text-[11px] uppercase tracking-[0.15em] text-[var(--ink-faint)] hover:text-[var(--psi)]"
+            className="font-data text-[10px] uppercase tracking-[0.15em] text-[var(--ink-faint)] hover:text-[var(--psi)]"
           >
             ← volver a la partida
           </Link>
-          <h1 className="mt-1 text-xl font-semibold tracking-tight">{game.map_name}</h1>
-          <p className="font-data text-[12px] text-[var(--ink-faint)]">
-            {fmtTime(game.duration_seconds ?? 0)} · {game.game_type} ·{" "}
-            {resim === "done"
-              ? "unidades, economía y bajas re-simuladas con OpenBW"
-              : "edificios y órdenes desde los comandos del replay"}
-          </p>
+          <h1 className="mt-0.5 truncate text-lg font-semibold tracking-tight">
+            {game.map_name}
+          </h1>
         </div>
-        <MatchupTiles matchup={game.my_matchup ?? game.matchup} size={20} />
+        <span className="font-data text-[11px] text-[var(--ink-faint)]">
+          {fmtTime(game.duration_seconds ?? 0)} · {game.game_type} ·{" "}
+          {resim === "done"
+            ? "re-simulado con OpenBW"
+            : "derivado de los comandos"}
+        </span>
+        <div className="ml-auto flex items-center gap-3">
+          <MatchupTiles matchup={game.my_matchup ?? game.matchup} size={18} />
+          {game.i_won != null && (
+            <span
+              className="font-data border px-2 py-[3px] text-[10px] font-semibold uppercase tracking-[0.14em]"
+              style={
+                game.i_won
+                  ? {
+                      color: "var(--vespene)",
+                      background: "var(--vespene-dim)",
+                      borderColor: "rgba(88,194,110,0.35)",
+                    }
+                  : {
+                      color: "var(--supply-red)",
+                      background: "var(--supply-red-dim)",
+                      borderColor: "rgba(224,83,79,0.35)",
+                    }
+              }
+            >
+              {game.i_won ? "Victoria" : "Derrota"}
+            </span>
+          )}
+        </div>
       </div>
 
       <ReplayPlayer gameId={game.id} resimStatus={resim} />

@@ -10,8 +10,9 @@ import {
   SUPPLY_COST,
   RACE_LETTER,
   BUILDING_SECONDS,
+  UNIT_SECONDS,
+  RESEARCH_SECONDS,
 } from "@/lib/bw";
-import { RaceTile } from "@/components/RaceTile";
 import type { ViewerData, ViewerEvent, ResimStatus } from "@/lib/viewer-data";
 import {
   parseResim,
@@ -63,8 +64,8 @@ const UNIT_RADIUS = [1.5, 2.2, 3.2];
 const BUILDING_SIDE = [7, 9.5, 12.5];
 
 // Painted terrain is beautiful and also loud: this veil pushes it back so the
-// units keep owning the board. Matches --void at ~45%.
-const TERRAIN_VEIL = "rgba(10,14,20,0.5)";
+// units keep owning the board. Matches --void at ~50%.
+const TERRAIN_VEIL = "rgba(7,17,13,0.5)";
 
 // Very dark tileset tints — the fallback board when there is no terrain PNG.
 const TILESET_BG: Record<string, string> = {
@@ -83,6 +84,24 @@ const VERDICT_COLOR: Record<string, string> = {
   bad: "var(--supply-red)",
   info: "var(--minerals)",
 };
+
+/** History chart: how many time buckets each player series carries. */
+const BUCKETS = 140;
+const BAR_GROUPS = 28;
+
+type MetricKey = "min" | "gas" | "sup" | "wk" | "army" | "bajas" | "apm";
+type ViewMode = "teams" | "all" | "focus";
+type ChartType = "line" | "area" | "bars";
+
+const METRICS: { key: MetricKey; label: string; unit: string; resim: boolean }[] = [
+  { key: "min", label: "Minerales", unit: "banco", resim: true },
+  { key: "gas", label: "Gas", unit: "banco", resim: true },
+  { key: "sup", label: "Supply", unit: "usado", resim: true },
+  { key: "wk", label: "Workers", unit: "vivos", resim: true },
+  { key: "army", label: "Ejército", unit: "unidades vivas", resim: true },
+  { key: "bajas", label: "Bajas", unit: "acumuladas", resim: true },
+  { key: "apm", label: "APM", unit: "ventana 60s", resim: false },
+];
 
 /** Half-unit supply reads as 11.5 for an odd number of zerglings. */
 const fmtSupply = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
@@ -205,6 +224,7 @@ interface RealStats {
   supplyMax: number;
   workers: number;
   army: number;
+  larvae: number;
   losses: number;
 }
 
@@ -232,7 +252,6 @@ export function ReplayPlayer({
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
-  const buildListRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef(0);
   const dirtyRef = useRef(true);
   const drawRef = useRef<() => void>(undefined);
@@ -359,7 +378,7 @@ export function ReplayPlayer({
       ctx.fillRect(0, 0, W, H);
     } else {
       // Fallback board: a grid every 16 tiles, so the scale is still readable.
-      ctx.strokeStyle = "rgba(148,180,220,0.05)";
+      ctx.strokeStyle = "rgba(84,232,150,0.06)";
       ctx.lineWidth = 1;
       for (let x = 512; x < data.map.widthPx; x += 512) {
         ctx.beginPath();
@@ -828,18 +847,29 @@ export function ReplayPlayer({
         supplyMax: resim.supplyMax(s, i) / 2,
         workers: 0,
         army: 0,
+        larvae: 0,
         losses: deathsUpTo(deaths, i, uiFrame),
       });
     });
 
     const focusIdx = focusId != null ? (idxOf.get(focusId) ?? -1) : -1;
     const mix = new Map<string, number>();
+    const bldgs = new Map<string, number>();
     const n = resim.unitCount(s);
     for (let i = 0; i < n; i++) {
       const info = resim.typeInfo(resim.unitType(s, i));
-      if (info.building || isPseudoType(info) || isEphemeralType(info)) continue;
+      if (isPseudoType(info)) continue;
       const owner = resim.unitOwner(s, i);
       const st = byId.get(resim.header.players[owner]?.id ?? -1);
+      if (info.building) {
+        if (owner === focusIdx) {
+          const b = shortUnitName(info.name);
+          bldgs.set(b, (bldgs.get(b) ?? 0) + 1);
+        }
+        continue;
+      }
+      if (st && /larva/i.test(info.name)) st.larvae++;
+      if (isEphemeralType(info)) continue;
       const worker = isWorkerType(info);
       if (st) {
         if (worker) st.workers++;
@@ -850,20 +880,91 @@ export function ReplayPlayer({
         mix.set(unit, (mix.get(unit) ?? 0) + 1);
       }
     }
+
+    // Bank drift over the last minute: how the pile moved, signed.
+    let drift: { min: number; gas: number } | null = null;
+    if (focusIdx >= 0) {
+      const back = resim.sampleAtFrame(uiFrame - 60 * FPS);
+      if (back >= 0 && back < s) {
+        const dt = (resim.frameAt(s) - resim.frameAt(back)) / FPS;
+        if (dt > 10) {
+          drift = {
+            min: Math.round(((resim.minerals(s, focusIdx) - resim.minerals(back, focusIdx)) * 60) / dt),
+            gas: Math.round(((resim.gas(s, focusIdx) - resim.gas(back, focusIdx)) * 60) / dt),
+          };
+        }
+      }
+    }
+
     return {
       byId,
-      aliveMix: [...mix].sort((a, b) => b[1] - a[1]).slice(0, 5),
+      aliveMix: [...mix].sort((a, b) => b[1] - a[1]).slice(0, 6),
+      buildings: [...bldgs].sort((a, b) => b[1] - a[1]).slice(0, 6),
+      drift,
     };
   }, [resim, uiFrame, focusId]);
 
-  const seconds = Math.floor(uiFrame / FPS);
+  // Full-history series for every player: built once per game, read by the
+  // chart under the board. Layer A only carries APM; layer B adds the rest.
+  const series = useMemo(() => {
+    if (!data) return null;
+    const frames = Math.max(1, data.frames);
+    const per = new Map<number, Partial<Record<MetricKey, Float64Array>>>();
+    for (const p of data.players) per.set(p.id, { apm: new Float64Array(BUCKETS) });
 
-  // Auto-scroll the live build order as it writes itself.
-  const buildCount = focusId != null ? (stats?.get(focusId)?.build.length ?? 0) : 0;
-  useEffect(() => {
-    const el = buildListRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [buildCount, focusId]);
+    const windowF = 60 * FPS;
+    for (const p of data.players) {
+      const acts = data.actions[p.id] ?? [];
+      const apm = per.get(p.id)!.apm!;
+      for (let b = 0; b < BUCKETS; b++) {
+        const f = ((b + 1) / BUCKETS) * frames;
+        const elapsed = Math.min(f, windowF) / FPS;
+        apm[b] = elapsed > 5 ? Math.round((countBetween(acts, f - windowF, f) * 60) / elapsed) : 0;
+      }
+    }
+
+    if (resim) {
+      for (const rec of per.values()) {
+        for (const k of ["min", "gas", "sup", "wk", "army", "bajas"] as const) {
+          rec[k] = new Float64Array(BUCKETS);
+        }
+      }
+      const idxOf = new Map(resim.header.players.map((rp, i) => [rp.id, i]));
+      const deaths = resim.deathIndex();
+      const wk = new Int32Array(resim.playerCount);
+      const army = new Int32Array(resim.playerCount);
+      for (let b = 0; b < BUCKETS; b++) {
+        const f = ((b + 1) / BUCKETS) * frames;
+        const s = resim.sampleAtFrame(f);
+        if (s < 0) continue;
+        wk.fill(0);
+        army.fill(0);
+        const n = resim.unitCount(s);
+        for (let i = 0; i < n; i++) {
+          const info = resim.typeInfo(resim.unitType(s, i));
+          if (info.building || isPseudoType(info) || isEphemeralType(info)) continue;
+          const o = resim.unitOwner(s, i);
+          if (o >= resim.playerCount) continue;
+          if (isWorkerType(info)) wk[o]++;
+          else army[o]++;
+        }
+        for (const p of data.players) {
+          const i = idxOf.get(p.id);
+          if (i == null) continue;
+          const rec = per.get(p.id)!;
+          rec.min![b] = resim.minerals(s, i);
+          rec.gas![b] = resim.gas(s, i);
+          rec.sup![b] = resim.supplyUsed(s, i) / 2;
+          rec.wk![b] = wk[i];
+          rec.army![b] = army[i];
+          rec.bajas![b] = deathsUpTo(deaths, i, f);
+        }
+      }
+    }
+    return per;
+  }, [data, resim]);
+
+  const seconds = Math.floor(uiFrame / FPS);
 
   async function generateCommentary() {
     setGenBusy(true);
@@ -883,7 +984,7 @@ export function ReplayPlayer({
   if (error) {
     return <p className="card p-5 text-[13px] text-[var(--supply-red)]">{error}</p>;
   }
-  if (!data || !stats) {
+  if (!data || !stats || !series) {
     return (
       <div className="card flex h-64 items-center justify-center">
         <span className="font-data text-[12px] text-[var(--ink-faint)]">cargando replay…</span>
@@ -893,9 +994,7 @@ export function ReplayPlayer({
 
   const aspect = data.map.widthPx / data.map.heightPx;
 
-  // Teams, mine first. The header line only earns its space in a real team game:
-  // in 1v1 and FFA every "team" is one player, so the grouping would be noise —
-  // the ordering still floats me to the top there.
+  // Teams, mine first. Grouping only earns its space in a real team game.
   const myTeam = data.players.find((p) => p.isMe)?.team ?? null;
   const teamOrder = [...new Set(data.players.map((p) => p.team))].sort((a, b) =>
     a === myTeam ? -1 : b === myTeam ? 1 : a - b
@@ -909,7 +1008,7 @@ export function ReplayPlayer({
     (c) => c.f <= uiFrame && uiFrame - c.f < CHAT_SECONDS * FPS
   );
   const saidComments = comments.filter((c) => c.at_seconds <= seconds);
-  const lastComments = saidComments.slice(-4).reverse();
+  const coachNow = saidComments[saidComments.length - 1] ?? null;
 
   const markers: Mark[] = [
     ...data.markers.filter((m) => showTech || m.kind !== "tech"),
@@ -922,15 +1021,62 @@ export function ReplayPlayer({
     })),
   ];
 
+  // Live production queue of the focused player: everything ordered whose
+  // (approximate) build time hasn't elapsed yet at the playhead.
+  const prodQueue: { name: string; pct: number; eta: number; tech: boolean }[] = [];
+  for (const e of data.events) {
+    if (e.f > uiFrame) break;
+    if (e.p !== focus.id) continue;
+    let dur: number | null = null;
+    let tech = false;
+    if (e.k === "Train" || e.k === "Unit Morph") dur = UNIT_SECONDS[e.i] ?? 25;
+    else if (e.k === "Build" || e.k === "Building Morph")
+      dur = BUILDING_SECONDS[e.i] ?? DEFAULT_BUILD_SECONDS;
+    else if (e.k === "Upgrade" || e.k === "Tech") {
+      dur = RESEARCH_SECONDS;
+      tech = true;
+    }
+    if (dur == null) continue;
+    const done = (uiFrame - e.f) / (dur * FPS);
+    if (done >= 1) continue;
+    prodQueue.push({
+      name: e.i,
+      pct: Math.round(done * 100),
+      eta: Math.max(1, Math.round(dur - (uiFrame - e.f) / FPS)),
+      tech,
+    });
+  }
+  const prodShown = prodQueue.slice(-7);
+
+  // Layer A fallback for the buildings grid: what the commands placed so far.
+  const bldgsA = new Map<string, number>();
+  if (!real) {
+    for (const e of data.events) {
+      if (e.f > uiFrame) break;
+      if (e.p === focus.id && (e.k === "Build" || e.k === "Building Morph"))
+        bldgsA.set(e.i, (bldgsA.get(e.i) ?? 0) + 1);
+    }
+  }
+  const buildings = real ? real.buildings : [...bldgsA].sort((a, b) => b[1] - a[1]).slice(0, 6);
+
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <div className="min-w-0 space-y-3">
-        {/* Board */}
-        <div className="card relative overflow-hidden p-3">
+    <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_412px]">
+      {/* ── Left column: board · timeline · full history ─────────────────── */}
+      <div className="min-w-0 space-y-2.5">
+        {/* Board — clipped corners, phosphor frame */}
+        <div
+          className="relative overflow-hidden border"
+          style={{
+            borderColor: "rgba(84,232,150,0.28)",
+            background: "#07110d",
+            clipPath:
+              "polygon(0 10px, 10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%)",
+          }}
+        >
           <div
             ref={boxRef}
             className="relative mx-auto"
-            style={{ aspectRatio: aspect, width: "100%", maxWidth: `calc(70vh * ${aspect})` }}
+            style={{ aspectRatio: aspect, width: "100%", maxWidth: `calc(66vh * ${aspect})` }}
             onPointerMove={(e) => {
               if (e.pointerType === "mouse") onProbeMove(e);
             }}
@@ -940,8 +1086,69 @@ export function ReplayPlayer({
             }}
             onPointerLeave={() => setHover(null)}
           >
-            <canvas ref={canvasRef} className="h-full w-full rounded-md" />
+            <canvas ref={canvasRef} className="h-full w-full" />
             {hover && <HoverCard info={hover} />}
+
+            {/* Rosters over the board: per team in team games, per player in 1v1 */}
+            <div className="absolute left-2 top-2 flex flex-col gap-1.5">
+              {teamOrder.map((team) => {
+                const roster = data.players.filter((p) => p.team === team);
+                const mineTeam = team === myTeam;
+                const teamSupply = roster.reduce(
+                  (n, p) => n + (real?.byId.get(p.id)?.supplyUsed ?? stats.get(p.id)?.supply ?? 0),
+                  0
+                );
+                return (
+                  <div
+                    key={team}
+                    className="flex items-center gap-2 border px-2 py-1 backdrop-blur-[6px]"
+                    style={{
+                      background: mineTeam ? "rgba(6,16,13,0.85)" : "rgba(6,16,13,0.72)",
+                      borderColor: mineTeam ? "rgba(84,232,150,0.4)" : "rgba(84,232,150,0.18)",
+                    }}
+                  >
+                    {showTeams && (
+                      <span
+                        className="font-data text-[9px] font-semibold tracking-[0.14em]"
+                        style={{ color: mineTeam ? "var(--psi)" : "var(--ink-faint)" }}
+                      >
+                        {mineTeam ? "TU EQUIPO" : `EQUIPO ${team}`}
+                      </span>
+                    )}
+                    <span className="flex flex-wrap gap-x-2 gap-y-0.5">
+                      {roster.map((p) => {
+                        const r = real?.byId.get(p.id) ?? null;
+                        const s = stats.get(p.id)!;
+                        const sup = r ? r.supplyUsed : s.supply;
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => setFocusId(p.id)}
+                            className="font-data flex cursor-pointer items-center gap-1 text-[10px]"
+                            style={{
+                              color:
+                                p.id === focus.id ? "var(--ink)" : "rgba(223,250,234,0.72)",
+                              textDecoration: s.left ? "line-through" : undefined,
+                            }}
+                            title={`${p.name} · ver su momento`}
+                          >
+                            <span className="h-[7px] w-[7px]" style={{ background: p.color }} />
+                            {p.name}
+                            <span style={{ color: "var(--ink-faint)" }}>{fmtSupply(sup)}</span>
+                          </button>
+                        );
+                      })}
+                    </span>
+                    {showTeams && (
+                      <span className="font-data text-[10px] font-semibold text-[var(--gold)]">
+                        Σ {fmtSupply(teamSupply)}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
             {/* Chat toasts */}
             <div className="pointer-events-none absolute bottom-2 left-2 space-y-1">
               {visibleChat.map((c, i) => {
@@ -949,8 +1156,8 @@ export function ReplayPlayer({
                 return (
                   <p
                     key={`${c.f}-${i}`}
-                    className="font-data rounded-md px-2 py-1 text-[11px]"
-                    style={{ background: "rgba(10,14,20,0.8)", color: "var(--ink)" }}
+                    className="font-data px-2 py-1 text-[11px]"
+                    style={{ background: "rgba(4,10,8,0.85)", color: "var(--ink)" }}
                   >
                     <span style={{ color: p?.color ?? "var(--ink-dim)" }}>{p?.name ?? "?"}</span>:{" "}
                     {c.msg}
@@ -972,324 +1179,457 @@ export function ReplayPlayer({
           onToggle={() => setPlaying((p) => !p)}
           onSpeed={setSpeed}
           onSeek={seek}
-          onNudge={nudge}
           onToggleTech={() => setShowTech((v) => !v)}
         />
 
+        <HistoryPanel
+          data={data}
+          series={series}
+          hasResim={resim != null}
+          uiFrame={uiFrame}
+          focusId={focus.id}
+          myTeam={myTeam}
+          showTeams={showTeams}
+          teamOrder={teamOrder}
+          onSeek={seek}
+        />
+
         <div className="flex flex-wrap items-center gap-2">
-          <Link
-            href={`/chat?game=${data.id}&t=${fmtTime(seconds)}`}
-            className="btn"
-            title="Abre el coach con este momento precargado"
-          >
-            Preguntar sobre este momento
-          </Link>
-          <button className="btn lg:hidden" onClick={() => setShowPanel((v) => !v)}>
-            {showPanel ? "Ocultar panel" : "Ver panel"}
+          <button className="btn xl:hidden" onClick={() => setShowPanel((v) => !v)}>
+            {showPanel ? "Ocultar momento" : "Ver momento"}
           </button>
-          <span className="font-data text-[11px] text-[var(--ink-faint)]">
-            espacio = play/pausa · ← → = ±10s
+          <span className="font-data text-[10px] text-[var(--ink-faint)]">
+            espacio = play/pausa · ← → = ±10s · clic en cualquier gráfica para saltar
           </span>
           {!real && (resimStatus === "pending" || resimStatus === "running") && (
-            <span className="font-data text-[11px] text-[var(--ink-faint)]">
-              · Re-simulación en curso — las unidades aparecerán al terminar
+            <span className="font-data text-[10px] text-[var(--ink-faint)]">
+              · Re-simulación en curso — economía y ejército aparecerán al terminar
             </span>
           )}
         </div>
       </div>
 
-      {/* Sidebar */}
-      <aside className={`${showPanel ? "" : "hidden"} space-y-3 lg:block`}>
-        {/* Coach track */}
-        <section className="card p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-[11px] font-semibold uppercase tracking-[0.15em] text-[var(--ink-dim)]">
-              Coach
-            </h3>
+      {/* ── Right column: this exact moment, one player at a time ────────── */}
+      <aside className={`${showPanel ? "" : "hidden"} min-w-0 space-y-2.5 xl:block`}>
+        <MomentHeader
+          players={data.players}
+          focus={focus}
+          seconds={seconds}
+          myTeam={myTeam}
+          showTeams={showTeams}
+          onPick={setFocusId}
+        />
+
+        {/* Snapshot: economy + supply + APM */}
+        <section className="card px-3 py-2.5">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="h-[9px] w-[9px] shrink-0" style={{ background: focus.color }} />
+            <h3 className="truncate text-[13px] font-semibold">{focus.name}</h3>
+            <span className="font-data border px-1.5 py-px text-[10px] font-semibold text-[var(--ink-faint)]">
+              {RACE_LETTER[focus.race] ?? "?"}
+            </span>
+            {focus.isMe && (
+              <span
+                className="font-data border px-1.5 py-px text-[9px] font-semibold tracking-[0.1em]"
+                style={{ color: "var(--gold)", borderColor: "var(--gold-line)" }}
+              >
+                TÚ
+              </span>
+            )}
+            <span className="font-data ml-auto text-[10px] text-[var(--ink-faint)]">
+              {focusStats.bases} base{focusStats.bases !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <Stat
+              label="MINERALES"
+              value={focusReal ? String(focusReal.minerals) : "—"}
+              color="var(--minerals)"
+              sub={
+                focusReal
+                  ? `${real?.drift ? `Δ ${real.drift.min > 0 ? "+" : ""}${real.drift.min}/min · ` : ""}${focusReal.workers} wk`
+                  : `${focusStats.workers} wk producidos`
+              }
+            />
+            <Stat
+              label="GAS"
+              value={focusReal ? String(focusReal.gas) : "—"}
+              color="var(--vespene)"
+              sub={
+                focusReal && real?.drift
+                  ? `Δ ${real.drift.gas > 0 ? "+" : ""}${real.drift.gas}/min`
+                  : "banco"
+              }
+            />
+            <Stat
+              label="SUPPLY"
+              value={
+                focusReal
+                  ? `${fmtSupply(focusReal.supplyUsed)}/${fmtSupply(focusReal.supplyMax)}`
+                  : fmtSupply(focusStats.supply)
+              }
+              color="var(--ink)"
+              sub={
+                focusReal && focusReal.larvae > 0
+                  ? `larvas ${focusReal.larvae}`
+                  : focusReal
+                    ? `✝ ${focusReal.losses} bajas`
+                    : "producido"
+              }
+            />
+          </div>
+
+          <div
+            className="mt-2.5 flex items-baseline gap-2.5 border-t pt-2.5"
+            style={{ borderColor: "var(--grid-line-soft)" }}
+          >
+            <span className="font-data text-[9px] font-medium tracking-[0.12em] text-[var(--ink-faint)]">
+              APM AHORA
+            </span>
+            <span className="font-data text-[16px] font-semibold">{focusStats.apm}</span>
+            <ApmSpark series={series.get(focus.id)?.apm} uiFrame={uiFrame} frames={data.frames} />
+          </div>
+        </section>
+
+        {/* Live production queue */}
+        <section
+          className="border px-3 py-2.5 backdrop-blur-[6px]"
+          style={{ borderColor: "rgba(255,207,63,0.32)", background: "rgba(26,21,6,0.5)" }}
+        >
+          <div className="mb-2 flex items-baseline gap-2">
+            <span className="font-data text-[9px] font-semibold tracking-[0.16em] text-[var(--gold)]">
+              EN PRODUCCIÓN
+            </span>
+            <span className="font-data ml-auto text-[9.5px] text-[rgba(255,207,63,0.6)]">
+              cola viva · tiempos aprox.
+            </span>
+          </div>
+          {prodShown.length === 0 ? (
+            <p className="font-data text-[11px] text-[var(--ink-ghost)]">nada en cola</p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {prodShown.map((p, i) => (
+                <div key={`${p.name}-${i}`} className="flex items-center gap-2">
+                  <span
+                    className="font-data flex h-5 w-5 flex-none items-center justify-center border text-[9px] font-semibold"
+                    style={
+                      p.tech
+                        ? { borderColor: "rgba(77,163,255,0.5)", color: "var(--minerals)" }
+                        : { borderColor: "rgba(255,207,63,0.5)", color: "var(--gold)" }
+                    }
+                  >
+                    {p.tech ? "↑" : "▲"}
+                  </span>
+                  <span
+                    className="min-w-0 flex-1 truncate text-[11.5px]"
+                    style={{ color: p.tech ? "#cfe6ff" : "#f2e6c4" }}
+                  >
+                    {p.name}
+                  </span>
+                  <div
+                    className="h-[5px] w-[74px] flex-none"
+                    style={{ background: p.tech ? "rgba(77,163,255,0.14)" : "rgba(255,207,63,0.14)" }}
+                  >
+                    <div
+                      className="h-full"
+                      style={{
+                        width: `${p.pct}%`,
+                        background: p.tech ? "var(--minerals)" : "var(--gold)",
+                      }}
+                    />
+                  </div>
+                  <span
+                    className="font-data w-[34px] flex-none text-right text-[10px]"
+                    style={{ color: p.tech ? "rgba(207,230,255,0.7)" : "rgba(255,207,63,0.7)" }}
+                  >
+                    {p.eta}s
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* Standing buildings */}
+        <section className="card px-3 py-2.5">
+          <p className="hud-label mb-2">Edificios</p>
+          {buildings.length === 0 ? (
+            <p className="font-data text-[11px] text-[var(--ink-ghost)]">todavía nada</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-1.5 min-[480px]:grid-cols-3">
+              {buildings.map(([name, n]) => (
+                <div
+                  key={name}
+                  className="flex items-center gap-1.5 border px-1.5 py-1"
+                  style={{ borderColor: "var(--grid-line-soft)" }}
+                >
+                  <span
+                    className="h-[13px] w-[16px] flex-none border"
+                    style={{ background: "var(--gold-dim)", borderColor: "rgba(255,207,63,0.45)" }}
+                  />
+                  <span className="font-data min-w-0 truncate text-[10px] text-[var(--ink-dim)]">
+                    {name}
+                  </span>
+                  <span className="font-data ml-auto text-[11px] font-semibold">{n}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {!real && buildings.length > 0 && (
+            <p className="font-data mt-1.5 text-[9px] text-[var(--ink-ghost)]">
+              colocados por comandos — sin re-simulación no se ven las pérdidas
+            </p>
+          )}
+        </section>
+
+        {/* Standing army */}
+        <section className="card px-3 py-2.5">
+          <div className="mb-2 flex items-baseline gap-2">
+            <p className="hud-label">Ejército en campo</p>
+            <span className="font-data ml-auto text-[9.5px] text-[var(--ink-faint)]">
+              {real
+                ? `${focusReal?.army ?? 0} unidades · ✝ ${focusReal?.losses ?? 0}`
+                : "producido (comandos)"}
+            </span>
+          </div>
+          {(real ? real.aliveMix : focusStats.mix).length === 0 ? (
+            <p className="font-data text-[11px] text-[var(--ink-ghost)]">sin ejército</p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {(real ? real.aliveMix : focusStats.mix).map(([unit, n], _, arr) => {
+                const max = arr[0]?.[1] ?? 1;
+                return (
+                  <div key={unit} className="flex items-center gap-2">
+                    <span
+                      className="font-data flex h-[18px] w-[18px] flex-none items-center justify-center border text-[8px] font-semibold"
+                      style={{ borderColor: "rgba(84,232,150,0.3)", color: "#a8f0cb" }}
+                    >
+                      ◆
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[11.5px]">{unit}</span>
+                    <div
+                      className="h-[5px] w-[70px] flex-none"
+                      style={{ background: "rgba(84,232,150,0.12)" }}
+                    >
+                      <div
+                        className="h-full"
+                        style={{ width: `${(n / max) * 100}%`, background: "var(--psi)" }}
+                      />
+                    </div>
+                    <span className="font-data w-[22px] flex-none text-right text-[11px] font-semibold">
+                      {n}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {focusStats.upgrades.length > 0 && (
+            <p
+              className="mt-2 border-t pt-2 text-[10.5px] leading-snug text-[var(--minerals)]"
+              style={{ borderColor: "var(--grid-line-soft)" }}
+            >
+              {focusStats.upgrades.slice(-4).join(" · ")}
+            </p>
+          )}
+        </section>
+
+        {/* Coach, anchored to this instant */}
+        <section
+          className="border px-3 py-2.5 backdrop-blur-[8px]"
+          style={{
+            borderColor: "var(--gold-line)",
+            background: "linear-gradient(180deg, rgba(38,30,8,0.75), rgba(12,16,12,0.7))",
+          }}
+        >
+          <div className="mb-1.5 flex items-center gap-2">
+            <span
+              className="font-data flex h-5 w-5 items-center justify-center rounded-full border-2 text-[10px] font-semibold"
+              style={{ borderColor: "var(--gold)", color: "var(--gold)" }}
+            >
+              ✦
+            </span>
+            <span className="font-data text-[9.5px] font-semibold tracking-[0.16em] text-[var(--gold)]">
+              COACH · EN ESTE MOMENTO
+            </span>
             {comments.length > 0 && (
-              <span className="font-data text-[10px] text-[var(--ink-faint)]">
+              <span className="font-data ml-auto text-[9.5px] text-[rgba(255,207,63,0.55)]">
                 {saidComments.length}/{comments.length}
               </span>
             )}
           </div>
           {comments.length === 0 ? (
             <>
-              <p className="mb-3 text-[12px] text-[var(--ink-dim)]">
-                Sin análisis todavía. El coach revisa la partida una sola vez y deja comentarios
+              <p className="text-[12px] leading-snug" style={{ color: "rgba(242,230,196,0.8)" }}>
+                Sin análisis todavía. El coach revisa la partida una vez y deja comentarios
                 anclados a cada momento.
               </p>
-              <button className="btn btn-psi w-full justify-center" onClick={generateCommentary} disabled={genBusy}>
-                {genBusy ? "Analizando…" : "Generar análisis del coach"}
+              <button
+                className="btn btn-gold mt-2 px-2.5 py-1.5 text-[10px] font-semibold tracking-[0.08em]"
+                onClick={generateCommentary}
+                disabled={genBusy}
+              >
+                {genBusy ? "ANALIZANDO…" : "GENERAR ANÁLISIS"}
               </button>
-              {genError && (
-                <p className="mt-2 text-[11px] text-[var(--supply-red)]">{genError}</p>
-              )}
+              {genError && <p className="mt-2 text-[11px] text-[var(--supply-red)]">{genError}</p>}
             </>
-          ) : lastComments.length === 0 ? (
-            <p className="text-[12px] text-[var(--ink-faint)]">
+          ) : coachNow == null ? (
+            <p className="text-[12px]" style={{ color: "rgba(242,230,196,0.7)" }}>
               El primer comentario llega en {fmtTime(comments[0].at_seconds)}.
             </p>
           ) : (
-            <div className="space-y-2">
-              {lastComments.map((c, i) => (
-                <div
-                  key={`${c.at_seconds}-${i}`}
-                  className="rounded-md p-2"
-                  style={{
-                    background: i === 0 ? "var(--hud)" : "transparent",
-                    borderLeft: `2px solid ${VERDICT_COLOR[c.verdict]}`,
-                    opacity: i === 0 ? 1 : 0.6,
-                  }}
-                >
-                  <p className="font-data mb-0.5 text-[10px]" style={{ color: VERDICT_COLOR[c.verdict] }}>
-                    {fmtTime(c.at_seconds)} · {c.verdict === "good" ? "bien" : c.verdict === "bad" ? "error" : "info"}
-                  </p>
-                  <p className="text-[12px] leading-snug text-[var(--ink-dim)]">{c.text}</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* Live scoreboard */}
-        <section className="card p-4">
-          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.15em] text-[var(--ink-dim)]">
-            En vivo
-          </h3>
-          <table className="w-full text-[12px]">
-            <thead>
-              <tr className="text-left text-[9px] uppercase tracking-[0.12em] text-[var(--ink-faint)]">
-                <th className="pb-1 font-medium">Jugador</th>
-                <th className="pb-1 text-right font-medium">APM</th>
-                <th className="pb-1 text-right font-medium">Wk</th>
-                <th className="pb-1 text-right font-medium">Sup</th>
-              </tr>
-            </thead>
-            <tbody>
-              {teamOrder.map((team) => {
-              const roster = data.players.filter((p) => p.team === team);
-              const teamSupply = roster.reduce(
-                (n, p) => n + (real?.byId.get(p.id)?.supplyUsed ?? stats.get(p.id)?.supply ?? 0),
-                0
-              );
-              const teamLosses = real
-                ? roster.reduce((n, p) => n + (real.byId.get(p.id)?.losses ?? 0), 0)
-                : null;
-              return (
-              <Fragment key={`team-${team}`}>
-              {showTeams && (
-                <tr className="border-t border-[var(--grid-line-soft)]">
-                  <td
-                    colSpan={2}
-                    className="pt-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em]"
-                    style={{ color: team === myTeam ? "var(--psi)" : "var(--ink-faint)" }}
-                  >
-                    {team === myTeam ? "Tu equipo" : `Equipo ${team}`}
-                  </td>
-                  <td
-                    colSpan={2}
-                    className="font-data pt-2 pb-1 text-right text-[10px] tabular-nums text-[var(--ink-faint)]"
-                    title="supply del equipo · bajas del equipo"
-                  >
-                    Σ {fmtSupply(teamSupply)}
-                    {teamLosses != null && (
-                      <>
-                        {" · "}
-                        <span style={{ color: "var(--supply-red)" }}>✝</span> {teamLosses}
-                      </>
-                    )}
-                  </td>
-                </tr>
-              )}
-              {roster.map((p) => {
-                const s = stats.get(p.id)!;
-                const r = real?.byId.get(p.id) ?? null;
-                return (
-                  <Fragment key={p.id}>
-                  <tr
-                    onClick={() => setFocusId(p.id)}
-                    className="cursor-pointer border-t border-[var(--grid-line-soft)]"
-                    style={p.id === focus.id ? { background: "var(--hud)" } : undefined}
-                  >
-                    <td className="py-1">
-                      <span className="flex items-center gap-1.5">
-                        <span
-                          className="h-[9px] w-[9px] shrink-0 rounded-[2px]"
-                          style={{ background: p.color, opacity: s.left ? 0.3 : 1 }}
-                        />
-                        <RaceTile letter={RACE_LETTER[p.race] ?? "?"} size={14} />
-                        <span
-                          className="max-w-[100px] truncate"
-                          style={{
-                            color: p.isMe ? "var(--psi)" : "var(--ink)",
-                            textDecoration: s.left ? "line-through" : undefined,
-                          }}
-                        >
-                          {p.name}
-                        </span>
-                      </span>
-                    </td>
-                    <td className="font-data text-right tabular-nums">{s.apm}</td>
-                    <td
-                      className="font-data text-right tabular-nums"
-                      style={{
-                        color:
-                          (r?.workers ?? s.workers) < s.saturation * 0.8
-                            ? "var(--energy)"
-                            : "var(--ink-dim)",
-                      }}
-                    >
-                      {r ? r.workers : s.workers}
-                    </td>
-                    <td className="font-data text-right tabular-nums text-[var(--ink-dim)]">
-                      {r ? `${fmtSupply(r.supplyUsed)}/${fmtSupply(r.supplyMax)}` : s.supply}
-                    </td>
-                  </tr>
-                  {r && (
-                    <tr
-                      onClick={() => setFocusId(p.id)}
-                      className="cursor-pointer"
-                      style={p.id === focus.id ? { background: "var(--hud)" } : undefined}
-                    >
-                      <td colSpan={4} className="pb-1">
-                        <span className="font-data flex gap-2 pl-[15px] text-[10px] tabular-nums text-[var(--ink-faint)]">
-                          <span style={{ color: "var(--minerals)" }}>{r.minerals}</span>
-                          <span style={{ color: "var(--vespene)" }}>{r.gas}</span>
-                          <span className="ml-auto" title="unidades perdidas hasta este momento">
-                            <span style={{ color: "var(--supply-red)" }}>✝</span> {r.losses}
-                          </span>
-                        </span>
-                      </td>
-                    </tr>
-                  )}
-                  </Fragment>
-                );
-              })}
-              </Fragment>
-              );
-              })}
-            </tbody>
-          </table>
-          {real ? (
-            <p className="mt-2 text-[10px] leading-snug text-[var(--ink-faint)]">
-              Datos reales de la re-simulación: Wk = workers vivos · Sup = supply usado/máximo ·
-              minerales / gas en mano · ✝ = unidades perdidas. APM sale de los comandos.
-            </p>
-          ) : (
-            <p className="mt-2 text-[10px] leading-snug text-[var(--ink-faint)]">
-              Estimado desde comandos: Wk = workers producidos vs. saturación ({focusStats.bases}{" "}
-              base{focusStats.bases !== 1 ? "s" : ""} ≈ {focusStats.saturation}) · Sup = supply de
-              ejército producido. Los replays guardan órdenes, no bajas.
-            </p>
-          )}
-        </section>
-
-        {/* Focused player */}
-        <section className="card p-4">
-          <div className="mb-2 flex items-center gap-2">
-            <span className="h-[10px] w-[10px] rounded-[2px]" style={{ background: focus.color }} />
-            <h3 className="truncate text-[13px] font-semibold">{focus.name}</h3>
-          </div>
-
-          <div className="mb-3">
-            <div className="mb-1 flex justify-between text-[10px] text-[var(--ink-faint)]">
-              <span>
-                workers {focusReal ? focusReal.workers : focusStats.workers}
-                {focusReal && <span className="text-[var(--ink-ghost)]"> vivos</span>}
-              </span>
-              <span>saturación ~{focusStats.saturation}</span>
-            </div>
-            <div className="h-[5px] w-full overflow-hidden rounded-full bg-[var(--hud)]">
-              <div
-                className="h-full rounded-full"
-                style={{
-                  width: `${Math.min(100, ((focusReal?.workers ?? focusStats.workers) / focusStats.saturation) * 100)}%`,
-                  background:
-                    (focusReal?.workers ?? focusStats.workers) < focusStats.saturation * 0.8
-                      ? "var(--energy)"
-                      : "var(--psi)",
-                }}
-              />
-            </div>
-          </div>
-
-          {real && (
-            <div className="mb-3">
-              <p className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-[var(--ink-faint)]">
-                <span>Ejército vivo</span>
-                <span className="font-data normal-case tracking-normal">
-                  {focusReal?.army ?? 0} unidades · ✝ {focusReal?.losses ?? 0}
-                </span>
-              </p>
-              {real.aliveMix.length === 0 ? (
-                <p className="font-data text-[11px] text-[var(--ink-ghost)]">sin ejército</p>
-              ) : (
-                <div className="space-y-0.5">
-                  {real.aliveMix.map(([unit, n]) => (
-                    <p key={unit} className="font-data flex justify-between text-[11px]">
-                      <span className="truncate text-[var(--ink)]">{unit}</span>
-                      <span className="tabular-nums">{n}</span>
-                    </p>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {focusStats.mix.length > 0 && (
-            <div className="mb-3 space-y-0.5">
-              {real && (
-                <p className="text-[10px] uppercase tracking-[0.12em] text-[var(--ink-faint)]">
-                  Producido (comandos)
-                </p>
-              )}
-              {focusStats.mix.map(([unit, n]) => (
-                <p key={unit} className="font-data flex justify-between text-[11px]">
-                  <span className="truncate text-[var(--ink-dim)]">{unit}</span>
-                  <span className="tabular-nums text-[var(--ink-dim)]">{n}</span>
-                </p>
-              ))}
-            </div>
-          )}
-
-          {focusStats.upgrades.length > 0 && (
-            <p className="mb-3 text-[11px] leading-snug text-[var(--minerals)]">
-              {focusStats.upgrades.slice(-4).join(" · ")}
-            </p>
-          )}
-
-          <p className="mb-1 text-[10px] uppercase tracking-[0.12em] text-[var(--ink-faint)]">
-            Build order en vivo
-          </p>
-          <div ref={buildListRef} className="font-data max-h-56 overflow-y-auto pr-1 text-[11px]">
-            {focusStats.build.length === 0 && (
-              <p className="text-[var(--ink-ghost)]">todavía nada</p>
-            )}
-            {focusStats.build.slice(-120).map((e, i, arr) => (
+            <>
               <p
-                key={`${e.f}-${i}`}
-                className="flex gap-2 whitespace-nowrap"
-                style={i === arr.length - 1 ? { color: "var(--ink)" } : undefined}
+                className="font-data mb-1 text-[10px]"
+                style={{ color: VERDICT_COLOR[coachNow.verdict] }}
               >
-                <span className="text-[var(--ink-ghost)]">{fmtTime(Math.round(e.f / FPS))}</span>
-                <span
-                  className="truncate"
-                  style={{
-                    color:
-                      i === arr.length - 1
-                        ? "var(--psi)"
-                        : e.k === "Upgrade" || e.k === "Tech"
-                          ? "var(--minerals)"
-                          : "var(--ink-dim)",
-                  }}
-                >
-                  {e.i}
-                </span>
+                {fmtTime(coachNow.at_seconds)} ·{" "}
+                {coachNow.verdict === "good" ? "bien" : coachNow.verdict === "bad" ? "error" : "info"}
               </p>
-            ))}
-          </div>
+              <p className="text-[12.5px] leading-[1.5]" style={{ color: "#f2e6c4" }}>
+                {coachNow.text}
+              </p>
+            </>
+          )}
+          <Link
+            href={`/chat?game=${data.id}&t=${fmtTime(seconds)}`}
+            className="btn btn-gold mt-2 px-2.5 py-1 text-[10px] font-semibold tracking-[0.08em]"
+            title="Abre el coach con este momento precargado"
+          >
+            PREGUNTAR
+          </Link>
         </section>
       </aside>
+    </div>
+  );
+}
+
+/** One economy figure of the snapshot card. */
+function Stat({
+  label,
+  value,
+  sub,
+  color,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  color: string;
+}) {
+  return (
+    <div>
+      <p className="font-data text-[9px] font-medium tracking-[0.12em] text-[var(--ink-faint)]">
+        {label}
+      </p>
+      <p className="font-data mt-0.5 text-[20px] font-semibold leading-none" style={{ color }}>
+        {value}
+      </p>
+      <p className="font-data mt-1 text-[9.5px] text-[var(--ink-faint)]">{sub}</p>
+    </div>
+  );
+}
+
+/** Tiny APM history up to the playhead, right of the live number. */
+function ApmSpark({
+  series,
+  uiFrame,
+  frames,
+}: {
+  series?: Float64Array;
+  uiFrame: number;
+  frames: number;
+}) {
+  if (!series) return null;
+  const upto = Math.max(2, Math.min(series.length, Math.ceil((uiFrame / frames) * series.length)));
+  const max = Math.max(1, ...Array.from(series.subarray(0, upto)));
+  const pts = Array.from(series.subarray(0, upto))
+    .map((v, i) => `${(i / (upto - 1)) * 120},${18 - (v / max) * 16}`)
+    .join(" ");
+  return (
+    <svg viewBox="0 0 120 20" width="120" height="20" className="ml-auto block">
+      <polyline points={pts} fill="none" stroke="var(--psi)" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+/** "Momento m:ss" row + the player picker that drives the whole right column. */
+function MomentHeader({
+  players,
+  focus,
+  seconds,
+  myTeam,
+  showTeams,
+  onPick,
+}: {
+  players: ViewerData["players"];
+  focus: ViewerData["players"][number];
+  seconds: number;
+  myTeam: number | null;
+  showTeams: boolean;
+  onPick: (id: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex items-center gap-2">
+      <span className="hud-label">Momento {fmtTime(seconds)}</span>
+      <div className="relative ml-auto">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="font-data flex min-w-[186px] cursor-pointer items-center gap-2 border px-2 py-1.5 text-[11px] font-semibold"
+          style={{
+            background: "rgba(4,10,8,0.85)",
+            borderColor: open ? "var(--gold-line)" : "rgba(84,232,150,0.35)",
+          }}
+        >
+          <span className="h-[9px] w-[9px] flex-none" style={{ background: focus.color }} />
+          <span className="flex-1 truncate text-left">{focus.name}</span>
+          <span className="text-[9.5px] text-[var(--ink-faint)]">
+            {RACE_LETTER[focus.race] ?? "?"}
+          </span>
+          <span className="text-[9px] text-[var(--gold)]">▼</span>
+        </button>
+        {open && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+            <div
+              className="absolute right-0 top-full z-20 mt-1 flex w-[236px] flex-col border p-1 backdrop-blur-[12px]"
+              style={{
+                background: "rgba(5,12,10,0.97)",
+                borderColor: "var(--gold-line)",
+                boxShadow: "0 14px 34px rgba(0,0,0,0.55)",
+              }}
+            >
+              {players.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    onPick(p.id);
+                    setOpen(false);
+                  }}
+                  className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-left text-[11.5px] hover:bg-[var(--psi-dim)]"
+                  style={{
+                    borderLeft: `2px solid ${p.color}`,
+                    background: p.id === focus.id ? "var(--hud)" : "transparent",
+                    color: p.id === focus.id ? "var(--ink)" : "var(--ink-dim)",
+                  }}
+                >
+                  <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                  <span className="font-data text-[9.5px] text-[var(--ink-faint)]">
+                    {RACE_LETTER[p.race] ?? "?"}
+                  </span>
+                  <span
+                    className="font-data w-[52px] text-right text-[8.5px] font-semibold tracking-[0.1em]"
+                    style={{ color: "var(--gold)" }}
+                  >
+                    {p.isMe ? "TÚ" : showTeams ? (p.team === myTeam ? "ALIADO" : `EQ ${p.team}`) : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -1303,15 +1643,12 @@ function HoverCard({ info }: { info: HoverInfo }) {
         left: info.x + (info.flipX ? -12 : 12),
         top: info.y + (info.flipY ? -12 : 12),
         transform: `translate(${info.flipX ? "-100%" : "0"}, ${info.flipY ? "-100%" : "0"})`,
-        background: "rgba(10,14,20,0.94)",
+        background: "rgba(4,10,8,0.94)",
       }}
     >
       {info.rows.map((r, i) => (
         <p key={i} className="flex items-center gap-1.5 whitespace-nowrap">
-          <span
-            className="h-[7px] w-[7px] shrink-0 rounded-[2px]"
-            style={{ background: r.color }}
-          />
+          <span className="h-[7px] w-[7px] shrink-0" style={{ background: r.color }} />
           {r.count > 1 && <span className="tabular-nums text-[var(--ink)]">{r.count}×</span>}
           <span className="truncate text-[var(--ink)]">{r.label}</span>
           {r.detail && <span className="text-[var(--supply-red)]">{r.detail}</span>}
@@ -1333,7 +1670,6 @@ function Controls({
   onToggle,
   onSpeed,
   onSeek,
-  onNudge,
   onToggleTech,
 }: {
   data: ViewerData;
@@ -1346,7 +1682,6 @@ function Controls({
   onToggle: () => void;
   onSpeed: (s: number) => void;
   onSeek: (f: number) => void;
-  onNudge: (seconds: number) => void;
   onToggleTech: () => void;
 }) {
   const barRef = useRef<HTMLDivElement>(null);
@@ -1360,25 +1695,35 @@ function Controls({
     if (r.width > 0) onSeek(((clientX - r.left) / r.width) * data.frames);
   };
 
+  const pct = `${(uiFrame / data.frames) * 100}%`;
+
   return (
-    <div className="card p-3">
+    <div
+      className="border px-3 pb-2.5 pt-2 backdrop-blur-[8px]"
+      style={{
+        borderColor: "rgba(84,232,150,0.24)",
+        background: "linear-gradient(180deg, rgba(9,26,20,0.8), rgba(6,16,13,0.7))",
+      }}
+    >
       {/* Marker lane */}
-      <div className="relative mb-1 h-[14px]">
+      <div className="relative -mx-3 mb-0.5 h-[15px]">
         {markers.map((m, i) => (
           <button
             key={i}
             onClick={() => onSeek(m.f)}
             title={`${fmtTime(Math.round(m.f / FPS))} — ${m.label}`}
-            className="absolute -translate-x-1/2 text-[9px] leading-none"
+            className="absolute -translate-x-1/2 cursor-pointer text-[9px] leading-none"
             style={{
               left: `${(m.f / data.frames) * 100}%`,
               color: m.comment
                 ? VERDICT_COLOR[m.comment.verdict]
                 : m.kind === "battle"
                   ? "var(--supply-red)"
-                  : m.kind === "chat"
-                    ? "var(--ink-faint)"
-                    : colorOf(m.p),
+                  : m.kind === "coach"
+                    ? "var(--gold)"
+                    : m.kind === "chat"
+                      ? "var(--ink-faint)"
+                      : colorOf(m.p),
               top: m.kind === "expansion" || m.kind === "tech" ? 6 : 0,
             }}
           >
@@ -1387,7 +1732,7 @@ function Controls({
         ))}
       </div>
 
-      {/* Scrub bar */}
+      {/* Scrub bar — full-bleed band, gold playhead */}
       <div
         ref={barRef}
         onPointerDown={(e) => {
@@ -1397,71 +1742,378 @@ function Controls({
         onPointerMove={(e) => {
           if (e.buttons === 1) seekFromEvent(e.clientX);
         }}
-        className="relative h-[10px] cursor-pointer rounded-full"
-        style={{ background: "var(--hud)" }}
+        className="relative -mx-3 h-[12px] cursor-pointer border-y"
+        style={{ background: "rgba(84,232,150,0.1)", borderColor: "rgba(84,232,150,0.18)" }}
       >
         <div
-          className="pointer-events-none absolute inset-y-0 left-0 rounded-full"
-          style={{ width: `${(uiFrame / data.frames) * 100}%`, background: "var(--psi-dim)" }}
+          className="pointer-events-none absolute inset-y-0 left-0"
+          style={{
+            width: pct,
+            background: "linear-gradient(90deg, rgba(84,232,150,0.18), rgba(84,232,150,0.32))",
+          }}
         />
         <div
-          className="pointer-events-none absolute top-1/2 h-[14px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full"
-          style={{ left: `${(uiFrame / data.frames) * 100}%`, background: "var(--psi)" }}
+          className="pointer-events-none absolute -inset-y-[3px] w-[3px] -translate-x-1/2"
+          style={{ left: pct, background: "var(--gold)", boxShadow: "0 0 8px rgba(255,207,63,0.8)" }}
         />
       </div>
 
       {/* Transport */}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button className="btn btn-psi w-[86px] justify-center" onClick={onToggle}>
-          {playing ? "Pausa" : "Reproducir"}
+      <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
+        <button
+          className="font-data cursor-pointer border px-3.5 py-1.5 text-[11px] font-semibold tracking-[0.1em]"
+          style={{
+            background: "var(--gold-dim)",
+            borderColor: "rgba(255,207,63,0.55)",
+            color: "var(--gold)",
+          }}
+          onClick={onToggle}
+        >
+          {playing ? "⏸ PAUSA" : "▶ PLAY"}
         </button>
-        <button className="btn" onClick={() => onNudge(-10)} title="Retroceder 10s">
-          −10s
-        </button>
-        <button className="btn" onClick={() => onNudge(10)} title="Adelantar 10s">
-          +10s
-        </button>
-        <span className="font-data ml-1 text-[13px] tabular-nums">
+        <span className="font-data text-[15px] font-semibold tabular-nums">
           {fmtTime(Math.floor(uiFrame / FPS))}
-          <span className="text-[var(--ink-faint)]"> / {fmtTime(data.durationSeconds)}</span>
+          <span className="font-normal text-[var(--ink-faint)]"> / {fmtTime(data.durationSeconds)}</span>
+        </span>
+        <span className="font-data hidden text-[10px] text-[var(--ink-faint)] sm:inline">
+          clic en la barra para saltar
         </span>
         {resimOn && (
           <span
-            className="font-data rounded-md px-1.5 py-0.5 text-[10px]"
+            className="font-data px-1.5 py-0.5 text-[10px]"
             style={{ background: "var(--psi-dim)", color: "var(--psi)" }}
             title="Unidades, economía y bajas vienen de la re-simulación OpenBW, no de los comandos"
           >
             Simulación completa
           </span>
         )}
-        <span className="ml-auto flex items-center gap-1">
+        <span className="ml-auto flex items-center gap-0.5">
           {SPEEDS.map((s) => (
             <button
               key={s}
               onClick={() => onSpeed(s)}
-              className="font-data rounded-md px-2 py-1 text-[11px]"
-              style={
-                s === speed
-                  ? { background: "var(--psi-dim)", color: "var(--psi)" }
-                  : { color: "var(--ink-faint)" }
-              }
+              className={`chip ${s === speed ? "chip-on" : ""}`}
+              style={{ fontSize: 11, textTransform: "none" }}
             >
               {s}×
             </button>
           ))}
           <button
             onClick={onToggleTech}
-            className="font-data ml-1 rounded-md px-2 py-1 text-[11px]"
-            style={
-              showTech
-                ? { background: "var(--hud-bright)", color: "var(--ink)" }
-                : { color: "var(--ink-faint)" }
-            }
+            className={`chip ml-1 ${showTech ? "chip-on" : ""}`}
+            style={{ fontSize: 11, textTransform: "none" }}
             title="Mostrar marcadores de upgrades y tech"
           >
             ▲ tech
           </button>
         </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The whole game, one metric at a time, for every player — under the player
+ * and synced to it: the gold playhead is the same instant the board shows,
+ * and clicking anywhere in the plot moves both.
+ */
+function HistoryPanel({
+  data,
+  series,
+  hasResim,
+  uiFrame,
+  focusId,
+  myTeam,
+  showTeams,
+  teamOrder,
+  onSeek,
+}: {
+  data: ViewerData;
+  series: Map<number, Partial<Record<MetricKey, Float64Array>>>;
+  hasResim: boolean;
+  uiFrame: number;
+  focusId: number;
+  myTeam: number | null;
+  showTeams: boolean;
+  teamOrder: number[];
+  onSeek: (f: number) => void;
+}) {
+  const available = METRICS.filter((m) => !m.resim || hasResim);
+  // Layer B may arrive after mount: the default metric is derived, so it
+  // upgrades from APM to supply on its own unless the user already picked one.
+  const [picked, setMetric] = useState<MetricKey | null>(null);
+  const [view, setView] = useState<ViewMode>(showTeams ? "teams" : "all");
+  const [type, setType] = useState<ChartType>("line");
+  const plotRef = useRef<HTMLDivElement>(null);
+
+  const active: MetricKey =
+    picked && available.some((m) => m.key === picked) ? picked : hasResim ? "sup" : "apm";
+  const meta = METRICS.find((m) => m.key === active)!;
+
+  // What gets drawn: one entry per line, already bucketed.
+  const lines = useMemo(() => {
+    const out: {
+      name: string;
+      color: string;
+      values: Float64Array;
+      width: number;
+      opacity: number;
+      dash?: string;
+    }[] = [];
+    const get = (pid: number) => series.get(pid)?.[active];
+
+    if (view === "teams" && showTeams) {
+      for (const team of teamOrder) {
+        const roster = data.players.filter((p) => p.team === team);
+        const sum = new Float64Array(BUCKETS);
+        for (const p of roster) {
+          const v = get(p.id);
+          if (v) for (let b = 0; b < BUCKETS; b++) sum[b] += v[b];
+        }
+        // Rolling-window APM averages instead of summing into a fake number.
+        if (active === "apm" && roster.length > 0)
+          for (let b = 0; b < BUCKETS; b++) sum[b] = Math.round(sum[b] / roster.length);
+        const mine = team === myTeam;
+        out.push({
+          name: mine ? "Tu equipo" : `Equipo ${team}`,
+          color: mine ? (roster.find((p) => p.isMe)?.color ?? "var(--psi)") : roster[0]?.color ?? "#9aa8bb",
+          values: sum,
+          width: mine ? 2.2 : 1.6,
+          opacity: 1,
+        });
+      }
+      return out;
+    }
+
+    for (const p of data.players) {
+      const v = get(p.id);
+      if (!v) continue;
+      const isFocus = p.id === focusId;
+      out.push({
+        name: p.name,
+        color: p.color,
+        values: v,
+        width: view === "focus" ? (isFocus ? 2.4 : 1.2) : p.isMe ? 2 : 1.4,
+        opacity: view === "focus" ? (isFocus ? 1 : 0.28) : 0.9,
+      });
+    }
+    // The highlighted line draws last, on top of the dimmed pack.
+    if (view === "focus") out.sort((a, b) => a.opacity - b.opacity);
+    return out;
+  }, [series, active, view, showTeams, teamOrder, data.players, myTeam, focusId]);
+
+  const yMax = useMemo(() => {
+    let max = 1;
+    for (const ln of lines) for (let b = 0; b < BUCKETS; b++) if (ln.values[b] > max) max = ln.values[b];
+    // Round up to a friendly ceiling so the axis labels read clean.
+    const mag = Math.pow(10, Math.floor(Math.log10(max)));
+    return Math.ceil(max / mag) * mag;
+  }, [lines]);
+
+  const curBucket = Math.min(
+    BUCKETS - 1,
+    Math.max(0, Math.floor((uiFrame / Math.max(1, data.frames)) * BUCKETS))
+  );
+  const headPct = `${(uiFrame / Math.max(1, data.frames)) * 100}%`;
+
+  const seekFromEvent = (clientX: number) => {
+    const el = plotRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0) onSeek(((clientX - r.left) / r.width) * data.frames);
+  };
+
+  const toPts = (v: Float64Array) =>
+    Array.from(v)
+      .map((y, b) => `${((b + 0.5) / BUCKETS) * 1000},${150 - (y / yMax) * 142}`)
+      .join(" ");
+
+  // Bars: BUCKETS collapsed into BAR_GROUPS side-by-side groups.
+  const bars = useMemo(() => {
+    if (type !== "bars") return null;
+    const per = Math.floor(BUCKETS / BAR_GROUPS);
+    return Array.from({ length: BAR_GROUPS }, (_, g) => ({
+      past: ((g + 0.5) / BAR_GROUPS) * data.frames <= uiFrame,
+      vals: lines.map((ln) => {
+        let sum = 0;
+        for (let b = g * per; b < (g + 1) * per; b++) sum += ln.values[b];
+        return { color: ln.color, opacity: ln.opacity, h: (sum / per / yMax) * 100 };
+      }),
+    }));
+  }, [type, lines, yMax, uiFrame, data.frames]);
+
+  const q = (n: number) => fmtTime(Math.floor((n / 4) * data.durationSeconds));
+
+  return (
+    <div className="card px-0 pb-2.5 pt-2.5">
+      {/* Header: scope + chart type */}
+      <div className="mx-3 mb-2 flex flex-wrap items-center gap-2">
+        <span className="hud-label">Historia completa · todos los jugadores</span>
+        <span className="ml-1 flex gap-1">
+          {showTeams && (
+            <button
+              className={`chip ${view === "teams" ? "chip-on" : ""}`}
+              onClick={() => setView("teams")}
+            >
+              Equipos
+            </button>
+          )}
+          <button className={`chip ${view === "all" ? "chip-on" : ""}`} onClick={() => setView("all")}>
+            {data.players.length} jugadores
+          </button>
+          <button
+            className={`chip ${view === "focus" ? "chip-on" : ""}`}
+            onClick={() => setView("focus")}
+          >
+            Destacar selección
+          </button>
+        </span>
+        <span className="ml-auto flex items-center gap-1">
+          <span className="font-data text-[9.5px] text-[var(--ink-ghost)]">GRÁFICO</span>
+          {(
+            [
+              ["line", "Línea"],
+              ["area", "Área"],
+              ["bars", "Barras"],
+            ] as [ChartType, string][]
+          ).map(([t, label]) => (
+            <button key={t} className={`chip ${type === t ? "chip-on" : ""}`} onClick={() => setType(t)}>
+              {label}
+            </button>
+          ))}
+        </span>
+      </div>
+
+      {/* Metric picker */}
+      <div className="mx-3 mb-2 flex flex-wrap gap-1">
+        {available.map((m) => (
+          <button
+            key={m.key}
+            className={`chip ${m.key === active ? "chip-on" : ""}`}
+            style={
+              m.key === active
+                ? undefined
+                : { borderColor: "var(--grid-line-soft)", color: "var(--ink-faint)" }
+            }
+            onClick={() => setMetric(m.key)}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Selected metric + legend with the value at the playhead */}
+      <div className="mx-3 mb-1.5 flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+        <span className="text-[12.5px] font-semibold">{meta.label}</span>
+        <span className="font-data text-[9.5px] text-[var(--ink-faint)]">{meta.unit}</span>
+        <span className="ml-auto flex flex-wrap justify-end gap-x-3 gap-y-0.5">
+          {lines.map((ln) => (
+            <span
+              key={ln.name}
+              className="font-data flex items-center gap-1.5 text-[10px]"
+              style={{ color: "rgba(223,250,234,0.62)", opacity: Math.max(0.5, ln.opacity) }}
+            >
+              <span className="h-[2px] w-[12px]" style={{ background: ln.color }} />
+              {ln.name}
+              <span className="font-semibold text-[var(--ink)]">
+                {Math.round(ln.values[curBucket])}
+              </span>
+            </span>
+          ))}
+        </span>
+      </div>
+
+      {/* The plot — clicking it is the same as clicking the scrub bar */}
+      <div
+        ref={plotRef}
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          seekFromEvent(e.clientX);
+        }}
+        onPointerMove={(e) => {
+          if (e.buttons === 1) seekFromEvent(e.clientX);
+        }}
+        className="relative h-[150px] cursor-pointer touch-none border-y"
+        style={{ borderTopColor: "var(--grid-line-soft)", borderBottomColor: "var(--grid-line)" }}
+      >
+        <div
+          className="pointer-events-none absolute left-0 right-0 top-1/2 h-px"
+          style={{ background: "rgba(84,232,150,0.08)" }}
+        />
+        <span className="font-data pointer-events-none absolute left-[5px] top-[3px] z-[2] text-[9px] text-[var(--ink-faint)]">
+          {yMax}
+        </span>
+        <span className="font-data pointer-events-none absolute left-[5px] top-1/2 z-[2] text-[9px] text-[var(--ink-ghost)]">
+          {Math.round(yMax / 2)}
+        </span>
+
+        {type !== "bars" ? (
+          <svg viewBox="0 0 1000 150" preserveAspectRatio="none" width="100%" height="150" className="block">
+            {type === "area" &&
+              lines.map((ln) => (
+                <polygon
+                  key={`a-${ln.name}`}
+                  points={`0,150 ${toPts(ln.values)} 1000,150`}
+                  fill={ln.color}
+                  opacity={0.16 * ln.opacity}
+                />
+              ))}
+            {lines.map((ln) => (
+              <polyline
+                key={ln.name}
+                points={toPts(ln.values)}
+                fill="none"
+                stroke={ln.color}
+                strokeWidth={ln.width}
+                strokeDasharray={ln.dash}
+                opacity={ln.opacity}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+          </svg>
+        ) : (
+          <div className="absolute inset-0 flex items-end gap-[7px] px-[5px]">
+            {bars!.map((bk, i) => (
+              <div
+                key={i}
+                className="flex h-full flex-1 items-end gap-px"
+                style={{ opacity: bk.past ? 1 : 0.45 }}
+              >
+                {bk.vals.map((v, j) => (
+                  <div
+                    key={j}
+                    className="flex-1"
+                    style={{ background: v.color, height: `${v.h}%`, opacity: v.opacity }}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Playhead, shared with the board */}
+        <div
+          className="pointer-events-none absolute inset-y-0 z-[3] w-[2px]"
+          style={{ left: headPct, background: "var(--gold)", boxShadow: "0 0 8px rgba(255,207,63,0.8)" }}
+        />
+        <div
+          className="font-data pointer-events-none absolute top-[2px] z-[4] -translate-x-1/2 whitespace-nowrap border px-[5px] text-[9.5px] font-semibold"
+          style={{
+            left: headPct,
+            color: "var(--gold)",
+            background: "rgba(8,18,14,0.9)",
+            borderColor: "var(--gold-line)",
+          }}
+        >
+          {fmtTime(Math.floor(uiFrame / FPS))}
+        </div>
+      </div>
+
+      {/* Time axis */}
+      <div className="font-data mx-3 mt-1 flex justify-between text-[9px] text-[var(--ink-ghost)]">
+        {[0, 1, 2, 3, 4].map((n) => (
+          <span key={n}>{q(n)}</span>
+        ))}
       </div>
     </div>
   );

@@ -55,6 +55,26 @@ export const BUILDING_SECONDS: Record<string, number> = {
   "Greater Spire": 63, "Defiler Mound": 38, "Ultralisk Cavern": 50,
 };
 
+// Approximate unit train/morph times in seconds at Fastest — drives the live
+// production queue in the replay console; precision is not critical.
+export const UNIT_SECONDS: Record<string, number> = {
+  // Protoss
+  Probe: 13, Zealot: 25, Dragoon: 32, "High Templar": 34, "Dark Templar": 32,
+  Reaver: 44, Observer: 27, Shuttle: 38, Scout: 50, Corsair: 25, Carrier: 88,
+  Arbiter: 100,
+  // Terran
+  SCV: 13, Marine: 15, Firebat: 15, Medic: 19, Ghost: 32, Vulture: 19,
+  "Siege Tank": 31, Goliath: 25, Wraith: 38, Dropship: 31, "Science Vessel": 50,
+  Battlecruiser: 84, Valkyrie: 31,
+  // Zerg
+  Drone: 13, Zergling: 18, Overlord: 25, Hydralisk: 18, Lurker: 25,
+  Mutalisk: 25, Scourge: 19, Queen: 31, Ultralisk: 38, Guardian: 25,
+  Devourer: 25, Defiler: 31, "Infested Terran": 25,
+};
+
+/** Upgrades/research mostly run 60–170s; one middle value keeps the bar honest. */
+export const RESEARCH_SECONDS = 100;
+
 export const RACE_LETTER: Record<string, string> = {
   Protoss: "P",
   Terran: "T",
