@@ -31,7 +31,7 @@ export function CommandBar() {
       <div className="mx-auto flex h-[52px] max-w-[1440px] items-center gap-5 px-4">
         <Link href="/" className="flex items-center gap-2">
           {/* Logo mark: the SC monogram (official vector, cropped to content). */}
-          <svg width="40" height="21" viewBox="0 13 48 23" aria-hidden fill="var(--ink)">
+          <svg width="30" height="15" viewBox="1 13 45.5 22.5" aria-hidden fill="var(--ink)">
             <path
               fillRule="evenodd"
               clipRule="evenodd"
