@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { LogoSC } from "@/components/LogoSC";
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
@@ -31,6 +32,9 @@ export default function LoginPage() {
   return (
     <main className="flex min-h-screen items-center justify-center p-6">
       <form onSubmit={submit} className="card w-full max-w-sm p-8">
+        <div className="mb-2">
+          <LogoSC height={26} />
+        </div>
         <p className="font-data text-[11px] uppercase tracking-[0.25em] text-[var(--psi)]">
           Starcraft
         </p>
