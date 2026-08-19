@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 const LINKS = [
   { href: "/", label: "Dashboard" },
   { href: "/games", label: "Partidas" },
+  { href: "/players", label: "Jugadores" },
   { href: "/chat", label: "Coach" },
 ];
 
@@ -28,11 +29,14 @@ export function CommandBar() {
       }}
     >
       <div className="mx-auto flex h-[52px] max-w-[1440px] items-center gap-5 px-4">
-        <Link href="/" className="flex items-center gap-1.5">
-          {/* Logo mark: twin phosphor blades. */}
-          <svg width="26" height="20" viewBox="0 0 26 20" aria-hidden>
-            <path d="M2 18 L11 2 L14 2 L5 18 Z" fill="var(--psi)" />
-            <path d="M12 18 L21 2 L24 2 L15 18 Z" fill="var(--gold)" opacity="0.9" />
+        <Link href="/" className="flex items-center gap-2">
+          {/* Logo mark: the SC monogram (official vector, cropped to content). */}
+          <svg width="40" height="21" viewBox="0 13 48 23" aria-hidden fill="var(--ink)">
+            <path
+              fillRule="evenodd"
+              clipRule="evenodd"
+              d="M5.4 17.77h12.2l1.6 1.4h.4l4.4-4.8v-.2l-.2-.2h-16q-1.2 0-1.8.6c-.6.4-1 1-1 2.2v.6c0 .2.2.4.4.4m40.4-3.6H28.2l-3.2 3v.4h14.2l.8 1.2s.2.2.4 0l5.6-4c0-.2 0-.2-.2-.6M40 32.77c-.4 0-1 .2-1.4.2-4.2-.2-7.4-3.4-7.8-7.4v-1.6c0-1.4 0-2.8.4-4.2v-.2h-6.4s-.2 0-.2.2c-.6 1.6-.8 3.2-.8 5 0 1.4.2 2 .6 3.6 1.2 3.8 5.6 7.2 9.2 7.2 5.4 0 6.8-1.8 6.8-2.4-.2-.2-.2-.4-.4-.4M13.8 19.768H6.6c-.2 0-.2.2-.2.2v.2s9.4 11 9.6 11.2h-5.4c-.8 0-1.6-.2-2.2-.8-.2-.2-.4-.4-.6-.8h-.4l-5.4 5v.4h19.8c1.2 0 1.8-1.2 2-2.4 0-.4-.2-1-.4-1.2-.8-1-9.6-11.8-9.6-11.8"
+            />
           </svg>
           <span className="text-[15px] font-bold tracking-tight">DOJO</span>
         </Link>

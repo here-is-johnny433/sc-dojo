@@ -143,7 +143,7 @@ function workersAt(resim: Resim, i: number): Int32Array {
  * MIN_BLOCK_SECONDS and games already at the 200 cap are not blocks: the first
  * is noise, the second is a full army, which is the goal and not a mistake.
  */
-function supplyBlocks(resim: Resim, p: number, fps: number): PlayerBlocks {
+export function supplyBlocks(resim: Resim, p: number, fps: number): PlayerBlocks {
   const blocks: SupplyBlock[] = [];
   let total = 0;
   let openFrom = -1;
@@ -168,7 +168,7 @@ function supplyBlocks(resim: Resim, p: number, fps: number): PlayerBlocks {
   return { blocks, totalSec: Math.round(total) };
 }
 
-async function loadResim(gameId: string): Promise<Resim | null> {
+export async function loadResim(gameId: string): Promise<Resim | null> {
   try {
     const raw = await gunzip(await fs.readFile(resimFilePath(gameId)));
     const buf = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;

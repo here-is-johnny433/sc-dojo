@@ -2,6 +2,7 @@ import crypto from "crypto";
 import path from "path";
 import fs from "fs/promises";
 import { db } from "./db";
+import { computePlayerScores } from "./scores";
 import { parseReplay, ScrepResult, ScrepCmd } from "./screp";
 import {
   framesToSeconds,
@@ -277,6 +278,14 @@ export async function ingestReplay(
 
   await fs.writeFile(repPath, buffer);
   await fs.writeFile(jsonPath, JSON.stringify(rep));
+
+  // Espectro de rendimiento: score every player now (screp-only variables);
+  // macro/combate se completan lazily cuando termina la re-simulación.
+  try {
+    await computePlayerScores(id);
+  } catch {
+    // never fail an import over a score — ensurePlayerScores() retries on view
+  }
 
   return { id, status: "imported" };
 }

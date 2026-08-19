@@ -67,6 +67,25 @@ CREATE TABLE IF NOT EXISTS build_order_events (
 );
 CREATE INDEX IF NOT EXISTS idx_boe_game ON build_order_events(game_id, player_id, frame);
 
+-- Espectro de rendimiento: five 0–10 variables per player per game (see
+-- lib/scores.ts for the curves). Rows scored before the re-simulation finished
+-- have with_resim = false and are upgraded lazily. `raw` keeps the underlying
+-- metrics (eapm, workers_8min, avg_unspent, trade_ratio, …) for transparency.
+CREATE TABLE IF NOT EXISTS player_scores (
+  game_id     TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  player_id   INTEGER NOT NULL,
+  mechanics   REAL,
+  economy     REAL,
+  macro       REAL,
+  combat      REAL,
+  build       REAL,
+  overall     REAL,
+  raw         JSONB NOT NULL DEFAULT '{}',
+  with_resim  BOOLEAN NOT NULL DEFAULT FALSE,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (game_id, player_id)
+);
+
 CREATE TABLE IF NOT EXISTS game_observations (
   id       BIGSERIAL PRIMARY KEY,
   game_id  TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,

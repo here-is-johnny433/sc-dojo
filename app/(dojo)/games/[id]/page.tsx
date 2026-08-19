@@ -5,7 +5,9 @@ import { fmtTime, WORKERS, RESOURCE_DEPOTS, RACE_LETTER } from "@/lib/bw";
 import { MatchupTiles, RaceTile } from "@/components/RaceTile";
 import { ArmyChart, WorkerChart, ArmyMinute, WorkerMinute } from "@/components/GameCharts";
 import { RealCharts } from "@/components/RealCharts";
+import { ScorePanel } from "@/components/ScorePanel";
 import { gameSeries } from "@/lib/game-series";
+import { ensurePlayerScores } from "@/lib/scores";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +30,9 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
   // Layer B: real numbers out of the OpenBW dump (plus hotkeys, which only need
   // the commands and therefore show up even while the re-simulation is queued).
   const series = await gameSeries(id);
+  // Espectro de rendimiento — computed on first visit, upgraded once the
+  // re-simulation lands.
+  const scores = await ensurePlayerScores(id).catch(() => []);
 
   const me = players.find((p) => p.is_me);
   const minutes = Math.max(1, Math.ceil((game.duration_seconds ?? 0) / 60));
@@ -168,12 +173,15 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
                 <td className="py-2">
                   <span className="flex items-center gap-2">
                     <RaceTile letter={RACE_LETTER[p.race] ?? "?"} size={17} />
-                    <span className={p.is_me ? "font-semibold" : ""}>
+                    <Link
+                      href={`/players/${encodeURIComponent(p.name)}`}
+                      className={`hover:underline ${p.is_me ? "font-semibold" : ""}`}
+                    >
                       {p.name}
                       {p.is_computer && (
                         <span className="ml-1.5 text-[10px] uppercase text-[var(--ink-faint)]">bot</span>
                       )}
-                    </span>
+                    </Link>
                     {p.is_winner && (
                       <span className="text-[10px] uppercase tracking-wider text-[var(--vespene)]">
                         win
@@ -194,6 +202,9 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
           </tbody>
         </table>
       </section>
+
+      {/* Espectro de rendimiento */}
+      <ScorePanel players={ordered} scores={scores} />
 
       {/* Observations */}
       {observations.length > 0 && (

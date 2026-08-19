@@ -76,6 +76,57 @@ export function goalStreak(recentChecks: { passed: boolean }[]): number {
   return streak;
 }
 
+// ---------- Espectro de rendimiento (player_scores) ----------
+
+export interface ScoreHistoryRow {
+  game_id: string;
+  played_at: string | null;
+  map_name: string | null;
+  matchup: string | null;
+  my_matchup: string | null;
+  duration_seconds: number | null;
+  is_winner: boolean | null;
+  race: string | null;
+  mechanics: number | null;
+  economy: number | null;
+  macro: number | null;
+  combat: number | null;
+  build: number | null;
+  overall: number | null;
+  with_resim: boolean;
+}
+
+/** Score evolution of one player (by name), oldest first. */
+export async function playerScoreHistory(name: string, limit = 200): Promise<ScoreHistoryRow[]> {
+  const r = await db().query(
+    `SELECT s.game_id, g.played_at, g.map_name, g.matchup, g.my_matchup, g.duration_seconds,
+            p.is_winner, p.race,
+            s.mechanics, s.economy, s.macro, s.combat, s.build, s.overall, s.with_resim
+     FROM player_scores s
+     JOIN game_players p ON p.game_id = s.game_id AND p.player_id = s.player_id
+     JOIN games g ON g.id = s.game_id
+     WHERE lower(p.name) = lower($1)
+     ORDER BY g.played_at ASC NULLS LAST
+     LIMIT $2`,
+    [name, limit]
+  );
+  return r.rows;
+}
+
+/** All player names seen across games, with how often — for the profile index. */
+export async function knownPlayers() {
+  const r = await db().query(
+    `SELECT p.name,
+            COUNT(*)::int AS games,
+            BOOL_OR(p.is_me) AS is_me,
+            MAX(g.played_at) AS last_played
+     FROM game_players p JOIN games g ON g.id = p.game_id
+     WHERE NOT p.is_computer
+     GROUP BY p.name ORDER BY games DESC, last_played DESC`
+  );
+  return r.rows;
+}
+
 export async function gameDetail(id: string) {
   const game = await db().query(`SELECT * FROM games WHERE id = $1`, [id]);
   if (!game.rowCount) return null;

@@ -13,22 +13,26 @@ interface Filters {
   result?: string;
 }
 
-async function filteredGames(f: Filters): Promise<GameRow[]> {
+async function filteredGames(f: Filters): Promise<(GameRow & { overall: number | null })[]> {
   const where: string[] = [];
   const params: unknown[] = [];
   if (f.map) {
     params.push(f.map);
-    where.push(`map_name = $${params.length}`);
+    where.push(`v.map_name = $${params.length}`);
   }
   if (f.matchup) {
     params.push(f.matchup);
-    where.push(`my_matchup = $${params.length}`);
+    where.push(`v.my_matchup = $${params.length}`);
   }
-  if (f.result === "win") where.push(`i_won = true`);
-  if (f.result === "loss") where.push(`i_won = false`);
-  if (f.result === "practice") where.push(`is_practice`);
-  const sql = `SELECT * FROM v_my_games ${where.length ? "WHERE " + where.join(" AND ") : ""}
-               ORDER BY played_at DESC NULLS LAST LIMIT 200`;
+  if (f.result === "win") where.push(`v.i_won = true`);
+  if (f.result === "loss") where.push(`v.i_won = false`);
+  if (f.result === "practice") where.push(`v.is_practice`);
+  const sql = `SELECT v.*, s.overall
+               FROM v_my_games v
+               JOIN game_players gp ON gp.game_id = v.id AND gp.is_me
+               LEFT JOIN player_scores s ON s.game_id = v.id AND s.player_id = gp.player_id
+               ${where.length ? "WHERE " + where.join(" AND ") : ""}
+               ORDER BY v.played_at DESC NULLS LAST LIMIT 200`;
   return (await db().query(sql, params)).rows;
 }
 
@@ -119,6 +123,7 @@ export default async function GamesPage({
               <th className="font-medium">Duración</th>
               <th className="font-medium">APM</th>
               <th className="font-medium">Hotkeys</th>
+              <th className="font-medium">Score</th>
               <th className="pr-5 text-right font-medium">Fecha</th>
             </tr>
           </thead>
@@ -158,6 +163,24 @@ export default async function GamesPage({
                 </td>
                 <td className="font-data text-[12px] tabular-nums text-[var(--ink-dim)]">
                   {g.hotkey_pct != null ? `${g.hotkey_pct}%` : "—"}
+                </td>
+                <td className="font-data text-[12px] font-semibold tabular-nums">
+                  {g.overall != null ? (
+                    <span
+                      style={{
+                        color:
+                          g.overall >= 7
+                            ? "var(--vespene)"
+                            : g.overall >= 4
+                              ? "var(--energy)"
+                              : "var(--supply-red)",
+                      }}
+                    >
+                      {g.overall.toFixed(1)}
+                    </span>
+                  ) : (
+                    <span className="text-[var(--ink-ghost)]">—</span>
+                  )}
                 </td>
                 <td className="font-data pr-5 text-right text-[12px] text-[var(--ink-faint)]">
                   {g.played_at
