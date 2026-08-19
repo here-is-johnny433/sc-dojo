@@ -15,6 +15,16 @@
  *      this script names them (useful to re-truncate an old dump):
  *        pnpm extract-bwdata --from-dir /path/to/raw-dump
  *
+ * `--tilesets` is a SEPARATE mode: it writes the *untruncated* tileset graphics
+ * (cv5 / vx4ex / vx4 / vr4 / wpe) to `./data/bwtiles/`, which is what
+ * `lib/map-render.ts` paints the replay-viewer terrain from. The truncation
+ * above is an OpenBW quirk and would destroy these files, so they never share a
+ * directory with `data/bwdata`.
+ *      pnpm extract-bwdata --tilesets --sc-dir "/Applications/StarCraft"
+ * The web container has no bind mount for them, so push them into the replays
+ * volume afterwards (map-render looks in $REPLAYS_DIR/bwtiles too):
+ *      docker compose cp ./data/bwtiles starcraft-dojo-web-1:/data/replays/bwtiles
+ *
  * Every file is truncated to its first `byteLength / 8` bytes: the SC:R CASC
  * assets are 8x the size OpenBW's 1.16 parser expects (this is exactly what
  * titan-reactor's `OpenBWFileList.loadBuffers` does). Without it OpenBW aborts
@@ -32,7 +42,24 @@ import fs from "fs";
 import path from "path";
 
 const OUT_DIR = path.join(process.cwd(), "data", "bwdata");
+const TILES_DIR = path.join(process.cwd(), "data", "bwtiles");
 const FILEPATHS = path.join(process.cwd(), "resim", "vendor", "filepaths.json");
+
+/** The eight stock tilesets, named the way the CASC/MPQ files are named. */
+const TILESETS = [
+  "badlands",
+  "platform",
+  "install",
+  "ashworld",
+  "jungle",
+  "desert",
+  "ice",
+  "twilight",
+];
+
+/** vx4 only exists in pre-Remastered data; SC:R ships vx4ex (32-bit indices). */
+const TILE_EXTS = ["cv5", "vx4ex", "vx4", "vr4", "wpe"];
+const REQUIRED_EXTS = new Set(["cv5", "vr4", "wpe"]);
 
 /** Flat on-disk name for a CASC path — must match `resim/lib/assets.js`. */
 function flatName(fp: string): string {
@@ -44,27 +71,46 @@ function arg(name: string): string | undefined {
   return i === -1 ? undefined : process.argv[i + 1];
 }
 
+function flag(name: string): boolean {
+  return process.argv.includes(`--${name}`);
+}
+
 interface Reader {
   read(fp: string): Buffer;
   close(): void;
 }
 
+interface CascLib {
+  openStorageSync(dir: string): unknown;
+  readFileSync(storage: unknown, file: string): Buffer;
+  closeStorage?(storage: unknown): void;
+}
+
 function cascReader(scDir: string): Reader {
-  let casc: {
-    openStorageSync(dir: string): unknown;
-    readFileSync(storage: unknown, file: string): Buffer;
-    closeStorage?(storage: unknown): void;
-  };
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    casc = require("casclib");
-  } catch {
+  // The addon is optional and awkward to build, so an already-compiled copy can
+  // be pointed at with --casclib / CASCLIB_PATH instead of installing it here.
+  const candidates = [arg("casclib") ?? process.env.CASCLIB_PATH, "casclib"].filter(
+    Boolean
+  ) as string[];
+  let loaded: unknown = null;
+  for (const c of candidates) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      loaded = require(c.startsWith(".") ? path.resolve(c) : c);
+      break;
+    } catch {
+      // try the next candidate
+    }
+  }
+  if (!loaded) {
     console.error(
       "casclib is not installed. It is an optional, extraction-only native addon —\n" +
-        "see the header of this file for the macOS build recipe, or use --from-dir."
+        "see the header of this file for the macOS build recipe, pass --casclib\n" +
+        "<path-to-a-built-copy>, or use --from-dir."
     );
     process.exit(1);
   }
+  const casc = loaded as CascLib;
   const storage = casc.openStorageSync(scDir);
   return {
     read: (fp) => casc.readFileSync(storage, fp.replace(/\\/g, "/")),
@@ -85,10 +131,73 @@ function dirReader(dir: string): Reader {
   };
 }
 
+/**
+ * casclib reports SC:R asset sizes 8x too large and zero-pads the rest, which is
+ * why the OpenBW dump above keeps only the first eighth. Detect that padding
+ * instead of assuming it, so a genuine 1.16 file read with --from-dir survives.
+ */
+function trimCascPadding(buf: Buffer): Buffer {
+  if (buf.byteLength === 0 || buf.byteLength % 8 !== 0) return buf;
+  const real = buf.byteLength / 8;
+  for (let i = real; i < buf.byteLength; i++) if (buf[i] !== 0) return buf;
+  return buf.subarray(0, real);
+}
+
+/**
+ * Terrain graphics for the replay viewer, in their genuine 1.16 layout — these
+ * are read by our own renderer (`lib/map-render.ts`), not by OpenBW.
+ */
+function extractTilesets(reader: Reader) {
+  fs.mkdirSync(TILES_DIR, { recursive: true });
+  const missing: string[] = [];
+  let written = 0;
+  let bytes = 0;
+
+  for (const name of TILESETS) {
+    const found: string[] = [];
+    for (const ext of TILE_EXTS) {
+      // CASC lookups are case-sensitive and Blizzard is not consistent about it.
+      const casings = [name, name[0].toUpperCase() + name.slice(1), name.toUpperCase()];
+      let raw: Buffer | null = null;
+      for (const c of new Set(casings)) {
+        try {
+          raw = reader.read(`TileSet\\${c}.${ext}`);
+          break;
+        } catch {
+          // next casing
+        }
+      }
+      if (!raw) {
+        if (REQUIRED_EXTS.has(ext)) missing.push(`${name}.${ext}`);
+        continue;
+      }
+      const buf = trimCascPadding(raw);
+      fs.writeFileSync(path.join(TILES_DIR, `${name}.${ext}`), buf);
+      found.push(ext);
+      written++;
+      bytes += buf.byteLength;
+    }
+    if (!found.includes("vx4ex") && !found.includes("vx4")) missing.push(`${name}.vx4ex|vx4`);
+    console.log(`  ${name.padEnd(9)} ${found.join(" ") || "(nothing found)"}`);
+  }
+  reader.close();
+
+  console.log(`bwtiles: ${written} files (${(bytes / 1024 / 1024).toFixed(1)} MB) → ${TILES_DIR}`);
+  console.log(
+    "Push them into the web container's replays volume so the map-image API can read them:\n" +
+      "  docker compose cp ./data/bwtiles starcraft-dojo-web-1:/data/replays/bwtiles"
+  );
+  if (missing.length) {
+    console.error(`\nmissing: ${missing.join(", ")}`);
+    process.exit(1);
+  }
+}
+
 function main() {
   const fromDir = arg("from-dir");
   const scDir = arg("sc-dir") || process.env.SC_DIR || "/Applications/StarCraft";
   const reader = fromDir ? dirReader(fromDir) : cascReader(scDir);
+  if (flag("tilesets")) return extractTilesets(reader);
   const filepaths: string[] = JSON.parse(fs.readFileSync(FILEPATHS, "utf8"));
 
   fs.mkdirSync(OUT_DIR, { recursive: true });

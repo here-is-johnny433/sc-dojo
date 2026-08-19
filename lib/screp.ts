@@ -69,7 +69,9 @@ export async function parseReplay(buffer: Buffer): Promise<ScrepResult> {
   try {
     const { stdout } = await execFileAsync(
       screpBinary(),
-      ["-cmds", "-map", "-mapres", tmp],
+      // -maptiles adds MapData.Tiles (the MTXM terrain), which lib/map-render.ts
+      // paints as the replay viewer's background.
+      ["-cmds", "-map", "-mapres", "-maptiles", tmp],
       { maxBuffer: 256 * 1024 * 1024, timeout: 30_000 }
     );
     return JSON.parse(stdout) as ScrepResult;

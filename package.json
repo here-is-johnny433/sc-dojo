@@ -9,6 +9,7 @@
     "lint": "eslint",
     "ingest": "tsx scripts/ingest-local.ts",
     "extract-bwdata": "tsx scripts/extract-bwdata.ts",
+    "reparse-maps": "tsx scripts/reparse-maps.ts",
     "set-password": "tsx scripts/set-password.ts",
     "db:setup": "psql \"$DATABASE_URL\" -f db/schema.sql"
   },

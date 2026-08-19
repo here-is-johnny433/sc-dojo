@@ -38,6 +38,9 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
       - replays:/data/replays
+      # Full (untruncated) tileset graphics for terrain rendering — generated
+      # with `pnpm extract-bwdata --tilesets`, Blizzard-owned, never in images.
+      - ./data/bwtiles:/data/replays/bwtiles:ro
     ports:
       - "127.0.0.1:3000:3000"   # localhost only — safe on the VPS too (Caddy proxies internally)
 

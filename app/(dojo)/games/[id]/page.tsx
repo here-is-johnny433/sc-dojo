@@ -4,6 +4,8 @@ import { gameDetail } from "@/lib/queries";
 import { fmtTime, WORKERS, RESOURCE_DEPOTS, RACE_LETTER } from "@/lib/bw";
 import { MatchupTiles, RaceTile } from "@/components/RaceTile";
 import { ArmyChart, WorkerChart, ArmyMinute, WorkerMinute } from "@/components/GameCharts";
+import { RealCharts } from "@/components/RealCharts";
+import { gameSeries } from "@/lib/game-series";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +25,9 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
   const detail = await gameDetail(id);
   if (!detail) notFound();
   const { game, players, events, observations } = detail;
+  // Layer B: real numbers out of the OpenBW dump (plus hotkeys, which only need
+  // the commands and therefore show up even while the re-simulation is queued).
+  const series = await gameSeries(id);
 
   const me = players.find((p) => p.is_me);
   const minutes = Math.max(1, Math.ceil((game.duration_seconds ?? 0) / 60));
@@ -217,9 +222,29 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
         </section>
       )}
 
+      {/* Real data — re-simulation (layer B) */}
+      {series && (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-[13px] font-semibold uppercase tracking-wider text-[var(--ink)]">
+              Datos reales <span className="text-[var(--ink-faint)]">(re-simulación)</span>
+            </h2>
+            <p className="text-[11px] text-[var(--ink-faint)]">
+              {series.hasResim
+                ? "medido en la re-simulación OpenBW, no estimado por comandos"
+                : `El resto de gráficas reales aparecerán cuando termine la re-simulación (estado: ${series.resimStatus}).`}
+            </p>
+          </div>
+          <RealCharts series={series} />
+        </section>
+      )}
+
       {/* Charts */}
       {me && (
         <>
+          <h2 className="pt-2 text-[13px] font-semibold uppercase tracking-wider text-[var(--ink)]">
+            Estimado por comandos
+          </h2>
           <section className="card p-5">
             <div className="mb-1 flex items-baseline justify-between">
               <h3 className="text-[13px] font-semibold uppercase tracking-wider text-[var(--ink-dim)]">

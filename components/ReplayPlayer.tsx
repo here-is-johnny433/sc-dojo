@@ -50,6 +50,9 @@ const MARKER_GLYPH: Record<Mark["kind"], string> = {
 
 const SPEEDS = [1, 2, 4, 8, 16];
 const TRAIL_SECONDS = 8; // how long an order dot lingers on the map
+const HOVER_RADIUS_PX = 14; // screen-space reach of the hover hit-test
+const HOVER_THROTTLE_MS = 30;
+const HOVER_MAX_ROWS = 7;
 const PING_SECONDS = 2;
 const CHAT_SECONDS = 9;
 const DEFAULT_BUILD_SECONDS = 30;
@@ -59,7 +62,11 @@ const DEATH_FLASH_SECONDS = 1; // how long a kill flashes where the unit died
 const UNIT_RADIUS = [1.5, 2.2, 3.2];
 const BUILDING_SIDE = [7, 9.5, 12.5];
 
-// Very dark tileset tints — the board should stay behind the data.
+// Painted terrain is beautiful and also loud: this veil pushes it back so the
+// units keep owning the board. Matches --void at ~45%.
+const TERRAIN_VEIL = "rgba(10,14,20,0.5)";
+
+// Very dark tileset tints — the fallback board when there is no terrain PNG.
 const TILESET_BG: Record<string, string> = {
   Jungle: "#0b1410",
   Twilight: "#110f1b",
@@ -169,6 +176,27 @@ function statsAt(data: ViewerData, frame: number): Map<number, PlayerStats> {
   return out;
 }
 
+/** One aggregated line of the map tooltip ("4× Dragoon — Ze_Pulp"). */
+interface HoverRow {
+  label: string;
+  detail?: string;
+  color: string;
+  /** units 0 · buildings 1 · terrain resources 2 — the order they're listed in. */
+  rank: number;
+  count: number;
+}
+
+interface HoverInfo {
+  /** Cursor position inside the board box, in CSS pixels. */
+  x: number;
+  y: number;
+  rows: HoverRow[];
+  more: number;
+  /** Set when the card would run past the right/bottom edge of the board. */
+  flipX: boolean;
+  flipY: boolean;
+}
+
 /** Live numbers read straight out of the re-simulation, per screp PlayerID. */
 interface RealStats {
   minerals: number;
@@ -200,6 +228,7 @@ export function ReplayPlayer({
   const [showPanel, setShowPanel] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
+  const [hover, setHover] = useState<HoverInfo | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -207,6 +236,9 @@ export function ReplayPlayer({
   const frameRef = useRef(0);
   const dirtyRef = useRef(true);
   const drawRef = useRef<() => void>(undefined);
+  /** Painted terrain, once the PNG arrives; null while loading or on 404. */
+  const terrainRef = useRef<HTMLImageElement | null>(null);
+  const hoverAtRef = useRef(0);
   // tag → unit index of the *next* sample, rebuilt only when that sample
   // changes (~twice a game second), never per drawn frame.
   const interpRef = useRef<{ sample: number; index: Map<number, number> } | null>(null);
@@ -264,6 +296,24 @@ export function ReplayPlayer({
     };
   }, [gameId]);
 
+  // The map's real terrain, rendered server-side from the replay's tiles. It is
+  // optional: a replay parsed without `-maptiles`, or a tileset we don't have,
+  // answers 404 and the board keeps its flat tint.
+  useEffect(() => {
+    terrainRef.current = null;
+    dirtyRef.current = true;
+    const img = new Image();
+    img.onload = () => {
+      terrainRef.current = img;
+      dirtyRef.current = true;
+    };
+    img.src = `/api/games/${gameId}/map-image`;
+    return () => {
+      img.onload = null;
+      terrainRef.current = null;
+    };
+  }, [gameId]);
+
   const seek = useCallback(
     (frame: number) => {
       if (!data || !Number.isFinite(frame)) return;
@@ -302,20 +352,27 @@ export function ReplayPlayer({
     ctx.fillStyle = TILESET_BG[data.map.tileset] ?? "#0b0f16";
     ctx.fillRect(0, 0, W, H);
 
-    // Terrain grid every 16 tiles.
-    ctx.strokeStyle = "rgba(148,180,220,0.05)";
-    ctx.lineWidth = 1;
-    for (let x = 512; x < data.map.widthPx; x += 512) {
-      ctx.beginPath();
-      ctx.moveTo(x * sx, 0);
-      ctx.lineTo(x * sx, H);
-      ctx.stroke();
-    }
-    for (let y = 512; y < data.map.heightPx; y += 512) {
-      ctx.beginPath();
-      ctx.moveTo(0, y * sy);
-      ctx.lineTo(W, y * sy);
-      ctx.stroke();
+    const terrain = terrainRef.current;
+    if (terrain) {
+      ctx.drawImage(terrain, 0, 0, W, H);
+      ctx.fillStyle = TERRAIN_VEIL;
+      ctx.fillRect(0, 0, W, H);
+    } else {
+      // Fallback board: a grid every 16 tiles, so the scale is still readable.
+      ctx.strokeStyle = "rgba(148,180,220,0.05)";
+      ctx.lineWidth = 1;
+      for (let x = 512; x < data.map.widthPx; x += 512) {
+        ctx.beginPath();
+        ctx.moveTo(x * sx, 0);
+        ctx.lineTo(x * sx, H);
+        ctx.stroke();
+      }
+      for (let y = 512; y < data.map.heightPx; y += 512) {
+        ctx.beginPath();
+        ctx.moveTo(0, y * sy);
+        ctx.lineTo(W, y * sy);
+        ctx.stroke();
+      }
     }
 
     // Resources.
@@ -546,6 +603,131 @@ export function ReplayPlayer({
     dirtyRef.current = true;
   }, [draw]);
 
+  // --- Hover: what is under the cursor, right now ---
+  // Reads the live frame (not the throttled UI mirror) and scans the current
+  // sample once; identical things collapse into one counted row.
+  const probe = useCallback(
+    (clientX: number, clientY: number): HoverInfo | null => {
+      const box = boxRef.current;
+      if (!box || !data) return null;
+      const rect = box.getBoundingClientRect();
+      const lx = clientX - rect.left;
+      const ly = clientY - rect.top;
+      if (lx < 0 || ly < 0 || lx > rect.width || ly > rect.height) return null;
+
+      const kx = rect.width / data.map.widthPx;
+      const ky = rect.height / data.map.heightPx;
+      const mx = lx / kx;
+      const my = ly / ky;
+      const reach = HOVER_RADIUS_PX * HOVER_RADIUS_PX;
+      const near = (x: number, y: number) => {
+        const dx = (x - mx) * kx;
+        const dy = (y - my) * ky;
+        return dx * dx + dy * dy <= reach;
+      };
+
+      const frame = frameRef.current;
+      const rows = new Map<string, HoverRow>();
+      const add = (key: string, row: Omit<HoverRow, "count">) => {
+        const hit = rows.get(key);
+        if (hit) hit.count++;
+        else rows.set(key, { ...row, count: 1 });
+      };
+
+      // A structure below full HP is either going up or taking damage; the only
+      // way to tell from a dump without a "completed" flag is to look for the
+      // player's own Build order on that spot, still inside its build time.
+      const beingBuilt = (x: number, y: number, playerId: number) =>
+        data.events.some(
+          (e) =>
+            e.x != null &&
+            e.y != null &&
+            e.p === playerId &&
+            (e.k === "Build" || e.k === "Land" || e.k === "Building Morph") &&
+            e.f <= frame &&
+            frame - e.f < (BUILDING_SECONDS[e.i] ?? DEFAULT_BUILD_SECONDS) * FPS &&
+            Math.abs(e.x - x) < 96 &&
+            Math.abs(e.y - y) < 96
+        );
+
+      if (resim) {
+        const s = resim.sampleAtFrame(frame);
+        const n = s >= 0 ? resim.unitCount(s) : 0;
+        for (let i = 0; i < n; i++) {
+          const info = resim.typeInfo(resim.unitType(s, i));
+          if (isPseudoType(info)) continue;
+          const x = resim.unitX(s, i);
+          const y = resim.unitY(s, i);
+          if (!near(x, y)) continue;
+          const owner = resim.header.players[resim.unitOwner(s, i)];
+          const p = data.players.find((pl) => pl.id === owner?.id);
+          const name = shortUnitName(info.name);
+          const hp = resim.unitHp(s, i);
+          if (info.building) {
+            const state = hp >= 100 ? "" : beingBuilt(x, y, p?.id ?? -1) ? " · en obra" : " · dañado";
+            add(`b|${name}|${owner?.id}|${hp}`, {
+              label: `${name} — ${p?.name ?? owner?.name ?? "?"}`,
+              detail: hp < 100 ? `${hp}%${state}` : undefined,
+              color: p?.color ?? "#9aa8bb",
+              rank: 1,
+            });
+          } else {
+            add(`u|${name}|${owner?.id}`, {
+              label: `${name} — ${p?.name ?? owner?.name ?? "?"}`,
+              color: p?.color ?? "#9aa8bb",
+              rank: 0,
+            });
+          }
+        }
+      } else {
+        // Layer A: only the structures the commands placed exist on the board.
+        for (const e of data.events) {
+          if (e.f > frame) break;
+          if (e.x == null || e.y == null || !near(e.x, e.y)) continue;
+          const p = data.players.find((pl) => pl.id === e.p);
+          const built = (BUILDING_SECONDS[e.i] ?? DEFAULT_BUILD_SECONDS) * FPS;
+          const done = frame - e.f >= built;
+          add(`a|${e.i}|${e.p}|${done}`, {
+            label: `${e.i} — ${p?.name ?? "?"}`,
+            detail: done ? undefined : "en obra",
+            color: p?.color ?? "#9aa8bb",
+            rank: 1,
+          });
+        }
+      }
+
+      const resource = (arr: number[], label: string) => {
+        for (let i = 0; i < arr.length; i += 2) {
+          if (near(arr[i], arr[i + 1])) add(`r|${label}`, { label, color: "#9aa8bb", rank: 2 });
+        }
+      };
+      resource(data.map.minerals, "Mineral field");
+      resource(data.map.geysers, "Vespene geyser");
+
+      if (rows.size === 0) return null;
+      const all = [...rows.values()].sort((a, b) => a.rank - b.rank || b.count - a.count);
+      return {
+        x: lx,
+        y: ly,
+        rows: all.slice(0, HOVER_MAX_ROWS),
+        more: Math.max(0, all.length - HOVER_MAX_ROWS),
+        flipX: lx > rect.width - 210,
+        flipY: ly > rect.height - 26 * Math.min(all.length, HOVER_MAX_ROWS) - 20,
+      };
+    },
+    [data, resim]
+  );
+
+  const onProbeMove = useCallback(
+    (e: React.PointerEvent) => {
+      const now = performance.now();
+      if (now - hoverAtRef.current < HOVER_THROTTLE_MS) return;
+      hoverAtRef.current = now;
+      setHover(probe(e.clientX, e.clientY));
+    },
+    [probe]
+  );
+
   // Keep the backing store at device resolution.
   useEffect(() => {
     const box = boxRef.current;
@@ -710,6 +892,16 @@ export function ReplayPlayer({
   }
 
   const aspect = data.map.widthPx / data.map.heightPx;
+
+  // Teams, mine first. The header line only earns its space in a real team game:
+  // in 1v1 and FFA every "team" is one player, so the grouping would be noise —
+  // the ordering still floats me to the top there.
+  const myTeam = data.players.find((p) => p.isMe)?.team ?? null;
+  const teamOrder = [...new Set(data.players.map((p) => p.team))].sort((a, b) =>
+    a === myTeam ? -1 : b === myTeam ? 1 : a - b
+  );
+  const showTeams = teamOrder.length > 1 && data.players.length > teamOrder.length;
+
   const focus = data.players.find((p) => p.id === focusId) ?? data.players[0];
   const focusStats = stats.get(focus.id)!;
   const focusReal = real?.byId.get(focus.id) ?? null;
@@ -739,8 +931,17 @@ export function ReplayPlayer({
             ref={boxRef}
             className="relative mx-auto"
             style={{ aspectRatio: aspect, width: "100%", maxWidth: `calc(70vh * ${aspect})` }}
+            onPointerMove={(e) => {
+              if (e.pointerType === "mouse") onProbeMove(e);
+            }}
+            onPointerDown={(e) => {
+              // Touch has no hover: a tap opens the tooltip, the next one closes it.
+              if (e.pointerType !== "mouse") setHover((h) => (h ? null : probe(e.clientX, e.clientY)));
+            }}
+            onPointerLeave={() => setHover(null)}
           >
             <canvas ref={canvasRef} className="h-full w-full rounded-md" />
+            {hover && <HoverCard info={hover} />}
             {/* Chat toasts */}
             <div className="pointer-events-none absolute bottom-2 left-2 space-y-1">
               {visibleChat.map((c, i) => {
@@ -865,7 +1066,42 @@ export function ReplayPlayer({
               </tr>
             </thead>
             <tbody>
-              {data.players.map((p) => {
+              {teamOrder.map((team) => {
+              const roster = data.players.filter((p) => p.team === team);
+              const teamSupply = roster.reduce(
+                (n, p) => n + (real?.byId.get(p.id)?.supplyUsed ?? stats.get(p.id)?.supply ?? 0),
+                0
+              );
+              const teamLosses = real
+                ? roster.reduce((n, p) => n + (real.byId.get(p.id)?.losses ?? 0), 0)
+                : null;
+              return (
+              <Fragment key={`team-${team}`}>
+              {showTeams && (
+                <tr className="border-t border-[var(--grid-line-soft)]">
+                  <td
+                    colSpan={2}
+                    className="pt-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em]"
+                    style={{ color: team === myTeam ? "var(--psi)" : "var(--ink-faint)" }}
+                  >
+                    {team === myTeam ? "Tu equipo" : `Equipo ${team}`}
+                  </td>
+                  <td
+                    colSpan={2}
+                    className="font-data pt-2 pb-1 text-right text-[10px] tabular-nums text-[var(--ink-faint)]"
+                    title="supply del equipo · bajas del equipo"
+                  >
+                    Σ {fmtSupply(teamSupply)}
+                    {teamLosses != null && (
+                      <>
+                        {" · "}
+                        <span style={{ color: "var(--supply-red)" }}>✝</span> {teamLosses}
+                      </>
+                    )}
+                  </td>
+                </tr>
+              )}
+              {roster.map((p) => {
                 const s = stats.get(p.id)!;
                 const r = real?.byId.get(p.id) ?? null;
                 return (
@@ -928,6 +1164,9 @@ export function ReplayPlayer({
                   )}
                   </Fragment>
                 );
+              })}
+              </Fragment>
+              );
               })}
             </tbody>
           </table>
@@ -1051,6 +1290,34 @@ export function ReplayPlayer({
           </div>
         </section>
       </aside>
+    </div>
+  );
+}
+
+/** What sits under the cursor on the board — pinned to it, never in its way. */
+function HoverCard({ info }: { info: HoverInfo }) {
+  return (
+    <div
+      className="card font-data pointer-events-none absolute z-10 max-w-[240px] px-2 py-1.5 text-[11px] leading-[1.5]"
+      style={{
+        left: info.x + (info.flipX ? -12 : 12),
+        top: info.y + (info.flipY ? -12 : 12),
+        transform: `translate(${info.flipX ? "-100%" : "0"}, ${info.flipY ? "-100%" : "0"})`,
+        background: "rgba(10,14,20,0.94)",
+      }}
+    >
+      {info.rows.map((r, i) => (
+        <p key={i} className="flex items-center gap-1.5 whitespace-nowrap">
+          <span
+            className="h-[7px] w-[7px] shrink-0 rounded-[2px]"
+            style={{ background: r.color }}
+          />
+          {r.count > 1 && <span className="tabular-nums text-[var(--ink)]">{r.count}×</span>}
+          <span className="truncate text-[var(--ink)]">{r.label}</span>
+          {r.detail && <span className="text-[var(--supply-red)]">{r.detail}</span>}
+        </p>
+      ))}
+      {info.more > 0 && <p className="text-[var(--ink-faint)]">+{info.more} más</p>}
     </div>
   );
 }
