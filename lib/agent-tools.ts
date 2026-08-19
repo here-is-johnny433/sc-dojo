@@ -127,7 +127,7 @@ async function runQuery(sql: string): Promise<string> {
   }
 }
 
-async function replayDetails(gameId: string): Promise<string> {
+export async function replayDetails(gameId: string): Promise<string> {
   if (!/^[a-f0-9]{16}$/.test(gameId)) return "ERROR: game_id inválido";
   const g = await db().query("SELECT * FROM games WHERE id = $1", [gameId]);
   if (!g.rowCount) return "ERROR: partida no encontrada";
@@ -137,13 +137,14 @@ async function replayDetails(gameId: string): Promise<string> {
   let leaves: unknown[] = [];
   try {
     const raw = JSON.parse(await fs.readFile(game.json_path, "utf8"));
-    const players = new Map(
-      (raw.Header.Players as { ID: number; Name: string }[]).map((p) => [p.ID, p.Name])
-    );
+    const headerPlayers = raw.Header.Players as { ID: number; SlotID: number; Name: string }[];
+    const players = new Map(headerPlayers.map((p) => [p.ID, p.Name]));
+    // Chat carries the real sender in SenderSlotID; PlayerID is unreliable there.
+    const bySlot = new Map(headerPlayers.map((p) => [p.SlotID, p.Name]));
     chat = (raw.Computed.ChatCmds ?? []).map(
-      (c: { Frame: number; PlayerID: number; Message: string }) => ({
+      (c: { Frame: number; PlayerID: number; SenderSlotID?: number; Message: string }) => ({
         time: fmtTime(Math.round(c.Frame / 23.81)),
-        player: players.get(c.PlayerID) ?? c.PlayerID,
+        player: bySlot.get(c.SenderSlotID ?? -1) ?? players.get(c.PlayerID) ?? c.PlayerID,
         message: c.Message,
       })
     );

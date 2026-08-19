@@ -43,11 +43,16 @@ function renderText(text: string) {
 export function ChatUI() {
   const params = useSearchParams();
   const gameId = params.get("game");
+  const at = params.get("t"); // moment picked in the replay viewer, mm:ss
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [convId, setConvId] = useState<number | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState(
-    gameId ? "Analiza esta partida a fondo: ¿qué hice bien, qué hice mal y qué debo cambiar?" : ""
+    gameId && at
+      ? `En el minuto ${at} de esta partida, ¿qué estaba pasando y qué debí hacer distinto?`
+      : gameId
+        ? "Analiza esta partida a fondo: ¿qué hice bien, qué hice mal y qué debo cambiar?"
+        : ""
   );
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<string | null>(null);

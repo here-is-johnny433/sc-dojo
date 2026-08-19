@@ -97,6 +97,17 @@ CREATE TABLE IF NOT EXISTS goal_checks (
   UNIQUE (goal_id, game_id)
 );
 
+-- Coach commentary track shown while replaying a game (generated once per game).
+CREATE TABLE IF NOT EXISTS game_commentary (
+  id         BIGSERIAL PRIMARY KEY,
+  game_id    TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  at_seconds INTEGER NOT NULL,
+  verdict    TEXT NOT NULL CHECK (verdict IN ('good','bad','info')),
+  text       TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_commentary_game ON game_commentary(game_id, at_seconds);
+
 CREATE TABLE IF NOT EXISTS chat_conversations (
   id         BIGSERIAL PRIMARY KEY,
   title      TEXT NOT NULL DEFAULT 'Nueva conversación',

@@ -134,6 +134,9 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
           </div>
           <div className="flex items-center gap-3">
             <MatchupTiles matchup={game.my_matchup ?? game.matchup} size={20} />
+            <Link href={`/games/${game.id}/replay`} className="btn">
+              Ver replay
+            </Link>
             <Link href={`/chat?game=${game.id}`} className="btn btn-psi">
               Analizar con el coach
             </Link>

@@ -35,6 +35,26 @@ export const SUPPLY_COST: Record<string, number> = {
   "Infested Terran": 1,
 };
 
+// Approximate build times in seconds at Fastest — used by the replay viewer to
+// fade a structure in from its Build command; precision is not critical.
+export const BUILDING_SECONDS: Record<string, number> = {
+  // Protoss
+  Pylon: 19, Gateway: 38, Assimilator: 25, "Cybernetics Core": 38, Forge: 25,
+  "Photon Cannon": 31, "Shield Battery": 19, Nexus: 75, "Robotics Facility": 50,
+  Stargate: 50, "Citadel of Adun": 38, "Templar Archives": 44, Observatory: 19,
+  "Robotics Support Bay": 19, "Fleet Beacon": 38, "Arbiter Tribunal": 44,
+  // Terran
+  "Command Center": 75, "Supply Depot": 25, Refinery: 25, Barracks: 50, Bunker: 19,
+  "Engineering Bay": 38, "Missile Turret": 19, Academy: 50, Factory: 50, Starport: 44,
+  "Science Facility": 38, Armory: 50, "Comsat Station": 25, "Nuclear Silo": 50,
+  "Machine Shop": 25, "Control Tower": 25, "Covert Ops": 25, "Physics Lab": 25,
+  // Zerg
+  Hatchery: 75, "Creep Colony": 13, Extractor: 25, "Spawning Pool": 50,
+  "Evolution Chamber": 25, "Hydralisk Den": 25, "Sunken Colony": 13, "Spore Colony": 13,
+  Lair: 63, Spire: 75, "Queen's Nest": 38, "Nydus Canal": 25, Hive: 63,
+  "Greater Spire": 63, "Defiler Mound": 38, "Ultralisk Cavern": 50,
+};
+
 export const RACE_LETTER: Record<string, string> = {
   Protoss: "P",
   Terran: "T",
