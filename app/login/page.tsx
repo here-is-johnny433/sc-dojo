@@ -33,7 +33,7 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center p-6">
       <form onSubmit={submit} className="card w-full max-w-sm p-8">
         <h1 className="mb-1 flex items-center gap-3">
-          <LogoSC height={24} />
+          <LogoSC height={17} />
           <span className="text-2xl font-bold tracking-tight">DOJO</span>
         </h1>
         <p className="mb-6 text-[13px] text-[var(--ink-dim)]">
