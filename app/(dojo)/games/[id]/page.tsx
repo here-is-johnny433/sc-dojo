@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { gameDetail } from "@/lib/queries";
+import { requireUser } from "@/lib/session";
 import { fmtTime, WORKERS, RESOURCE_DEPOTS, RACE_LETTER } from "@/lib/bw";
 import { MatchupTiles, RaceTile } from "@/components/RaceTile";
 import { ArmyChart, WorkerChart, ArmyMinute, WorkerMinute } from "@/components/GameCharts";
@@ -22,14 +23,16 @@ interface Ev {
 export default async function GamePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!/^[a-f0-9]{16}$/.test(id)) notFound();
-  const detail = await gameDetail(id);
+  const user = await requireUser();
+  const detail = await gameDetail(id, user);
   if (!detail) notFound();
   const { game, players, events, observations } = detail;
   // Layer B: real numbers out of the OpenBW dump (plus hotkeys, which only need
   // the commands and therefore show up even while the re-simulation is queued).
-  const series = await gameSeries(id);
+  const series = await gameSeries(id, user.id);
 
-  const me = players.find((p) => p.is_me);
+  // Perspectiva: la fila del espectador. Si no jugó, vista de observador.
+  const me = players.find((p) => Number(p.user_id) === user.id);
   const minutes = Math.max(1, Math.ceil((game.duration_seconds ?? 0) / 60));
   const evs = events as Ev[];
 
@@ -95,9 +98,25 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
 
   // --- Build order columns (mine first, then allies, then opponents) ---
   const ordered = [...players].sort((a, b) => {
-    const rank = (p: typeof a) => (p.is_me ? 0 : p.team === me?.team ? 1 : 2);
+    const rank = (p: typeof a) => (p.player_id === me?.player_id ? 0 : p.team === me?.team ? 1 : 2);
     return rank(a) - rank(b) || a.player_id - b.player_id;
   });
+  const iWon: boolean | null = me ? me.is_winner : null;
+
+  // Matchup desde la perspectiva del espectador ("PZ vs TT"); sin él, el crudo.
+  const teamLetters = (t: number) =>
+    players
+      .filter((p) => p.team === t)
+      .map((p) => RACE_LETTER[p.race] ?? "?")
+      .sort()
+      .join("");
+  const myMatchup = me
+    ? `${teamLetters(me.team)} vs ${[...new Set(players.filter((p) => p.team !== me.team).map((p) => p.team as number))]
+        .map(teamLetters)
+        .sort()
+        .join("+")}`
+    : null;
+
   const structural = (e: Ev) =>
     e.kind !== "Train" || !WORKERS.has(e.item); // hide worker spam in the timeline
 
@@ -112,20 +131,22 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
               <span
                 className="rounded-md px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider"
                 style={
-                  game.i_won === null
+                  iWon === null
                     ? { background: "var(--hud)", color: "var(--ink-dim)" }
-                    : game.i_won
+                    : iWon
                       ? { background: "var(--vespene-dim)", color: "var(--vespene)" }
                       : { background: "var(--supply-red-dim)", color: "var(--supply-red)" }
                 }
               >
                 {game.is_practice
                   ? "práctica"
-                  : game.i_won === null
-                    ? "sin resultado"
-                    : game.i_won
-                      ? "victoria"
-                      : "derrota"}
+                  : !me
+                    ? "no jugaste esta partida"
+                    : iWon === null
+                      ? "sin resultado"
+                      : iWon
+                        ? "victoria"
+                        : "derrota"}
               </span>
             </div>
             <p className="font-data mt-1 text-[12px] text-[var(--ink-faint)]">
@@ -138,7 +159,7 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <MatchupTiles matchup={game.my_matchup ?? game.matchup} size={20} />
+            <MatchupTiles matchup={myMatchup ?? game.matchup} size={20} />
             <Link href={`/games/${game.id}/replay`} className="btn">
               Ver replay
             </Link>
@@ -163,12 +184,12 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
               <tr
                 key={p.player_id}
                 className="border-t border-[var(--grid-line-soft)]"
-                style={p.is_me ? { background: "var(--psi-dim)" } : undefined}
+                style={p.player_id === me?.player_id ? { background: "var(--psi-dim)" } : undefined}
               >
                 <td className="py-2">
                   <span className="flex items-center gap-2">
                     <RaceTile letter={RACE_LETTER[p.race] ?? "?"} size={17} />
-                    <span className={p.is_me ? "font-semibold" : ""}>
+                    <span className={p.player_id === me?.player_id ? "font-semibold" : ""}>
                       {p.name}
                       {p.is_computer && (
                         <span className="ml-1.5 text-[10px] uppercase text-[var(--ink-faint)]">bot</span>
@@ -287,7 +308,9 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
             <div key={p.player_id} className="min-w-0">
               <p className="mb-2 flex items-center gap-1.5 truncate text-[12px] font-medium">
                 <RaceTile letter={RACE_LETTER[p.race] ?? "?"} size={15} />
-                <span className={p.is_me ? "text-[var(--psi)]" : ""}>{p.name}</span>
+                <span className={p.player_id === me?.player_id ? "text-[var(--psi)]" : ""}>
+                  {p.name}
+                </span>
               </p>
               <div className="font-data max-h-96 space-y-0.5 overflow-y-auto pr-1 text-[11px] leading-[1.8]">
                 {evs

@@ -7,41 +7,75 @@ import {
   recentGames,
   activeGoal,
   goalStreak,
+  listPlayers,
 } from "@/lib/queries";
+import { requireUser } from "@/lib/session";
 import { fmtTime } from "@/lib/bw";
 import { MatchupTiles } from "@/components/RaceTile";
 import { FormStrip } from "@/components/FormStrip";
+import { PlayerSwitcher } from "@/components/PlayerSwitcher";
 import { ApmTrend, WinrateTrend } from "@/components/TrendCharts";
 
 export const dynamic = "force-dynamic";
 
-export default async function Dashboard() {
+export default async function Dashboard({
+  searchParams,
+}: {
+  searchParams: Promise<{ player?: string }>;
+}) {
+  const user = await requireUser();
+  const players = await listPlayers();
+  const requested = Number((await searchParams).player);
+  const viewed = players.find((p) => p.id === requested) ?? { id: user.id, name: user.name };
+  // Las metas son privadas: solo se muestran al dueño (el admin ve todas).
+  const showGoal = viewed.id === user.id || user.role === "admin";
+
   const [stats, matchups, maps, trend, games, goal] = await Promise.all([
-    overviewStats(),
-    matchupStats(),
-    mapStats(),
-    monthlyTrend(),
-    recentGames(20),
-    activeGoal(),
+    overviewStats(viewed.id),
+    matchupStats(viewed.id),
+    mapStats(viewed.id),
+    monthlyTrend(viewed.id),
+    recentGames(viewed.id, 20),
+    showGoal ? activeGoal(viewed.id) : null,
   ]);
 
   const winrate =
     stats.decided > 0 ? Math.round((100 * stats.wins) / stats.decided) : null;
 
+  const header = (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <h1 className="text-xl font-semibold tracking-tight">
+        {viewed.id === user.id ? "Tu dojo" : `Dojo de ${viewed.name}`}
+      </h1>
+      <PlayerSwitcher players={players} value={viewed.id} sessionId={user.id} />
+    </div>
+  );
+
   if (!stats.games) {
     return (
-      <div className="card mx-auto mt-16 max-w-lg p-10 text-center">
-        <p className="font-data text-[11px] uppercase tracking-[0.25em] text-[var(--psi)]">
-          Dojo vacío
-        </p>
-        <h1 className="mb-2 mt-1 text-xl font-semibold">Aún no hay partidas</h1>
-        <p className="mb-6 text-[13px] text-[var(--ink-dim)]">
-          Sube tus replays o corre <code className="font-data">pnpm ingest</code> para
-          importar tu carpeta de AutoSave.
-        </p>
-        <Link href="/games" className="btn btn-psi">
-          Subir replays
-        </Link>
+      <div className="space-y-4">
+        {header}
+        <div className="card mx-auto mt-10 max-w-lg p-10 text-center">
+          <p className="font-data text-[11px] uppercase tracking-[0.25em] text-[var(--psi)]">
+            Dojo vacío
+          </p>
+          <h2 className="mb-2 mt-1 text-xl font-semibold">Aún no hay partidas</h2>
+          {viewed.id === user.id ? (
+            <>
+              <p className="mb-6 text-[13px] text-[var(--ink-dim)]">
+                Sube tus replays o corre <code className="font-data">pnpm ingest</code> para
+                importar tu carpeta de AutoSave.
+              </p>
+              <Link href="/games" className="btn btn-psi">
+                Subir replays
+              </Link>
+            </>
+          ) : (
+            <p className="text-[13px] text-[var(--ink-dim)]">
+              {viewed.name} todavía no tiene partidas vinculadas a sus cuentas.
+            </p>
+          )}
+        </div>
       </div>
     );
   }
@@ -50,8 +84,10 @@ export default async function Dashboard() {
 
   return (
     <div className="space-y-5">
+      {header}
+
       {/* Active goal — the point of the dojo */}
-      {goal ? (
+      {!showGoal ? null : goal ? (
         <section
           className="relative overflow-hidden border p-5"
           style={{
@@ -239,7 +275,10 @@ export default async function Dashboard() {
           <h3 className="text-[13px] font-semibold uppercase tracking-wider text-[var(--ink-dim)]">
             Últimas partidas
           </h3>
-          <Link href="/games" className="text-[12px] text-[var(--minerals)] hover:underline">
+          <Link
+            href={viewed.id === user.id ? "/games" : `/games?player=${viewed.id}`}
+            className="text-[12px] text-[var(--minerals)] hover:underline"
+          >
             Ver todas →
           </Link>
         </div>

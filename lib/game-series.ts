@@ -237,7 +237,7 @@ function hotkeySeries(
  * without a dump: the hotkey series only needs the commands, so the page can
  * still show something while the re-simulation is queued.
  */
-export async function gameSeries(gameId: string): Promise<GameSeries | null> {
+export async function gameSeries(gameId: string, viewerId: number): Promise<GameSeries | null> {
   const g = await db().query(
     "SELECT id, duration_seconds, frames, json_path, resim_status FROM games WHERE id = $1",
     [gameId]
@@ -246,7 +246,7 @@ export async function gameSeries(gameId: string): Promise<GameSeries | null> {
   const game = g.rows[0];
 
   const pr = await db().query(
-    "SELECT player_id, name, race, team, is_me FROM game_players WHERE game_id = $1 ORDER BY team, player_id",
+    "SELECT player_id, name, race, team, user_id FROM game_players WHERE game_id = $1 ORDER BY team, player_id",
     [gameId]
   );
   const players: SeriesPlayer[] = pr.rows.map((r) => ({
@@ -254,7 +254,7 @@ export async function gameSeries(gameId: string): Promise<GameSeries | null> {
     name: r.name,
     race: r.race,
     team: r.team,
-    isMe: !!r.is_me,
+    isMe: Number(r.user_id) === viewerId,
   }));
 
   const durationSeconds =

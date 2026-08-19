@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { db } from "@/lib/db";
 import { replayDetails } from "@/lib/agent-tools";
+import { getSessionUser, type SessionUser } from "@/lib/session";
 import { fmtTime } from "@/lib/bw";
 
 export const runtime = "nodejs";
@@ -39,8 +40,8 @@ const COMMENTARY_TOOL: Anthropic.Tool = {
   },
 };
 
-function prompt(duration: number, details: string) {
-  return `Eres el coach del Starcraft Dojo analizando un replay de Brood War para tu alumno Stephan (cuentas EdgarallanPulp y Ze_Pulp). Abajo está el detalle completo de la partida en JSON.
+function prompt(user: SessionUser, duration: number, details: string) {
+  return `Eres el coach del Starcraft Dojo analizando un replay de Brood War para tu alumno ${user.name} (cuentas ${user.aliases.join(", ")}). Abajo está el detalle completo de la partida en JSON.
 
 Genera entre 8 y 14 comentarios anclados a momentos concretos, que se mostrarán durante la reproducción del replay al llegar su timestamp.
 
@@ -48,7 +49,7 @@ REGLAS:
 - at_seconds entre 0 y ${duration} (${fmtTime(duration)}), repartidos por toda la partida, en orden ascendente.
 - Cada comentario debe citar un dato verificable del build order o del chat (timing, conteo, unidad, upgrade). Nada genérico.
 - verdict: "good" lo que hizo bien, "bad" el error concreto (y qué debió hacer), "info" contexto o lo que hacía el rival.
-- Enfócate en Stephan: al menos 8 de los comentarios son sobre su juego.
+- Enfócate en ${user.name}: al menos 8 de los comentarios son sobre su juego.
 - Español, tono de coach: directo, concreto, una o dos frases. Sin markdown.
 - Devuélvelos con la herramienta emit_commentary.
 
@@ -73,10 +74,12 @@ function parseComments(raw: unknown, duration: number): Comment[] {
   return out.sort((a, b) => a.at_seconds - b.at_seconds);
 }
 
-async function listComments(gameId: string): Promise<Comment[]> {
+/** La pista es privada por usuario: cada jugador tiene la suya. */
+async function listComments(gameId: string, user: SessionUser): Promise<Comment[]> {
   const r = await db().query(
-    "SELECT at_seconds, verdict, text FROM game_commentary WHERE game_id = $1 ORDER BY at_seconds",
-    [gameId]
+    `SELECT at_seconds, verdict, text FROM game_commentary
+     WHERE game_id = $1 AND user_id = $2 ORDER BY at_seconds`,
+    [gameId, user.id]
   );
   return r.rows;
 }
@@ -86,13 +89,28 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   if (!/^[a-f0-9]{16}$/.test(id)) {
     return NextResponse.json({ error: "id inválido" }, { status: 400 });
   }
-  return NextResponse.json({ comments: await listComments(id) });
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  return NextResponse.json({ comments: await listComments(id, user) });
 }
 
 export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   if (!/^[a-f0-9]{16}$/.test(id)) {
     return NextResponse.json({ error: "id inválido" }, { status: 400 });
+  }
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // El prompt habla de "tu juego": sin fila en la partida no hay comentario.
+  const played = await db().query(
+    "SELECT 1 FROM game_players WHERE game_id = $1 AND user_id = $2",
+    [id, user.id]
+  );
+  if (!played.rowCount) {
+    return NextResponse.json(
+      { error: "solo los jugadores de la partida generan comentarios" },
+      { status: 400 }
+    );
   }
   if (!process.env.ANTHROPIC_API_KEY) {
     return NextResponse.json(
@@ -105,7 +123,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
   if (!g.rowCount) return NextResponse.json({ error: "partida no encontrada" }, { status: 404 });
   const duration: number = g.rows[0].duration_seconds ?? 0;
 
-  const details = await replayDetails(id);
+  const details = await replayDetails(id, user.id);
   if (details.startsWith("ERROR")) {
     return NextResponse.json({ error: details }, { status: 500 });
   }
@@ -117,7 +135,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
       max_tokens: 4000,
       tools: [COMMENTARY_TOOL],
       tool_choice: { type: "tool", name: "emit_commentary" },
-      messages: [{ role: "user", content: prompt(duration, details.slice(0, 120_000)) }],
+      messages: [{ role: "user", content: prompt(user, duration, details.slice(0, 120_000)) }],
     });
     const toolUse = response.content.find((b) => b.type === "tool_use");
     if (toolUse) {
@@ -142,11 +160,14 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
   const client = await db().connect();
   try {
     await client.query("BEGIN");
-    await client.query("DELETE FROM game_commentary WHERE game_id = $1", [id]);
+    await client.query("DELETE FROM game_commentary WHERE game_id = $1 AND user_id = $2", [
+      id,
+      user.id,
+    ]);
     for (const c of comments) {
       await client.query(
-        "INSERT INTO game_commentary (game_id, at_seconds, verdict, text) VALUES ($1,$2,$3,$4)",
-        [id, c.at_seconds, c.verdict, c.text]
+        "INSERT INTO game_commentary (game_id, user_id, at_seconds, verdict, text) VALUES ($1,$2,$3,$4,$5)",
+        [id, user.id, c.at_seconds, c.verdict, c.text]
       );
     }
     await client.query("COMMIT");
@@ -157,5 +178,5 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     client.release();
   }
 
-  return NextResponse.json({ comments: await listComments(id) });
+  return NextResponse.json({ comments: await listComments(id, user) });
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { db } from "@/lib/db";
 import { AGENT_TOOLS, executeTool } from "@/lib/agent-tools";
+import { getSessionUser, type SessionUser } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -9,7 +10,8 @@ export const maxDuration = 120;
 const MODEL = "claude-sonnet-5";
 const MAX_TOOL_ROUNDS = 10;
 
-const SYSTEM_PROMPT = `Eres el coach del Starcraft Dojo: un entrenador experto de StarCraft: Brood War Remastered. Tu alumno es Stephan (cuentas: EdgarallanPulp y Ze_Pulp), juega Protoss, mayormente 2v2 con amigos. Hablas español, directo y motivador, como un coach de verdad: concreto, con números, sin paja.
+const systemPrompt = (user: SessionUser) =>
+  `Eres el coach del Starcraft Dojo: un entrenador experto de StarCraft: Brood War Remastered. Tu alumno es ${user.name} (cuentas: ${user.aliases.join(", ") || "sin alias registrados"}), juega mayormente 2v2 con amigos. Hablas español, directo y motivador, como un coach de verdad: concreto, con números, sin paja.
 
 Conoces a fondo Brood War: builds estándar por matchup, counters (qué unidad frena qué), timings, macro (workers constantes, expansiones, gastar minerales), micro, y cómo se entrena de verdad.
 
@@ -31,7 +33,7 @@ DATOS:
 - Los replays de BW guardan comandos, no estado: "ejército producido" es producción acumulada, no ejército vivo. Sé honesto con esa limitación.
 - EXCEPCIÓN: las partidas re-simuladas con OpenBW sí tienen bajas y posiciones reales — get_battle_report te da las batallas (cuándo, dónde, qué perdió cada uno) y los totales de bajas. Úsalo siempre que hables de peleas o intercambios; si devuelve resim_status distinto de 'done', dilo y sigue con los comandos.
 - Las duraciones/timestamps ya están en segundos de juego (velocidad Fastest).
-- En v_my_games, cada fila es una partida SUYA con sus stats (apm, eapm, hotkey_pct, i_won, my_matchup).
+- En v_player_games cada fila es una partida de un jugador con sus stats (apm, eapm, hotkey_pct, i_won, my_matchup, my_race). Su user_id es ${user.id}: filtra SIEMPRE con \`WHERE user_id = ${user.id}\` o estarás mirando partidas de otro jugador.
 
 FORMATO: respuestas concisas en markdown. Usa números y timestamps concretos. Cuando propongas un objetivo o cierres uno, explica por qué. Si te piden analizar una partida, usa get_replay_details y señala 2-3 cosas accionables, no veinte.`;
 
@@ -41,9 +43,24 @@ interface ChatBody {
   gameId?: string;
 }
 
+/** true si la conversación existe y el usuario puede leerla (dueño o admin). */
+async function ownsConversation(id: number, user: SessionUser): Promise<boolean> {
+  const r = await db().query(
+    "SELECT 1 FROM chat_conversations WHERE id = $1 AND ($2::boolean OR user_id = $3)",
+    [id, user.role === "admin", user.id]
+  );
+  return !!r.rowCount;
+}
+
 export async function GET(req: NextRequest) {
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
   const convId = req.nextUrl.searchParams.get("conversationId");
   if (convId) {
+    if (!(await ownsConversation(Number(convId), user))) {
+      return NextResponse.json({ error: "conversación no encontrada" }, { status: 404 });
+    }
     const messages = await db().query(
       "SELECT id, role, content, created_at FROM chat_messages WHERE conversation_id = $1 ORDER BY id",
       [Number(convId)]
@@ -53,12 +70,15 @@ export async function GET(req: NextRequest) {
   const conversations = await db().query(
     `SELECT c.id, c.title, c.created_at,
             (SELECT MAX(m.created_at) FROM chat_messages m WHERE m.conversation_id = c.id) AS last_at
-     FROM chat_conversations c ORDER BY last_at DESC NULLS LAST LIMIT 30`
+     FROM chat_conversations c WHERE c.user_id = $1 ORDER BY last_at DESC NULLS LAST LIMIT 30`,
+    [user.id]
   );
   return NextResponse.json({ conversations: conversations.rows });
 }
 
 export async function POST(req: NextRequest) {
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!process.env.ANTHROPIC_API_KEY) {
     return NextResponse.json(
       { error: "Falta ANTHROPIC_API_KEY en el .env — créala en console.anthropic.com" },
@@ -71,10 +91,14 @@ export async function POST(req: NextRequest) {
 
   // Create or reuse the conversation.
   let conversationId = body.conversationId;
-  if (!conversationId) {
+  if (conversationId) {
+    if (!(await ownsConversation(conversationId, user))) {
+      return NextResponse.json({ error: "conversación no encontrada" }, { status: 404 });
+    }
+  } else {
     const r = await db().query(
-      "INSERT INTO chat_conversations (title) VALUES ($1) RETURNING id",
-      [text.slice(0, 80)]
+      "INSERT INTO chat_conversations (user_id, title) VALUES ($1,$2) RETURNING id",
+      [user.id, text.slice(0, 80)]
     );
     conversationId = r.rows[0].id as number;
   }
@@ -108,7 +132,7 @@ export async function POST(req: NextRequest) {
       const response = await anthropic.messages.create({
         model: MODEL,
         max_tokens: 3000,
-        system: SYSTEM_PROMPT,
+        system: systemPrompt(user),
         tools: AGENT_TOOLS,
         messages,
       });
@@ -131,7 +155,7 @@ export async function POST(req: NextRequest) {
       for (const block of response.content) {
         if (block.type !== "tool_use") continue;
         toolActivity.push(block.name);
-        const result = await executeTool(block.name, block.input as Record<string, unknown>);
+        const result = await executeTool(block.name, block.input as Record<string, unknown>, user);
         results.push({
           type: "tool_result",
           tool_use_id: block.id,

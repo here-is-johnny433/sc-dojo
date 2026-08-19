@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { gameDetail } from "@/lib/queries";
+import { requireUser } from "@/lib/session";
 import { resimStatus } from "@/lib/viewer-data";
 import { fmtTime } from "@/lib/bw";
 import { MatchupTiles } from "@/components/RaceTile";
@@ -11,10 +12,15 @@ export const dynamic = "force-dynamic";
 export default async function ReplayPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!/^[a-f0-9]{16}$/.test(id)) notFound();
-  const detail = await gameDetail(id);
+  const user = await requireUser();
+  const detail = await gameDetail(id, user);
   if (!detail) notFound();
-  const { game } = detail;
+  const { game, players } = detail;
   const resim = await resimStatus(id);
+
+  // Resultado desde la perspectiva del espectador; sin fila suya, sin badge.
+  const me = players.find((p) => Number(p.user_id) === user.id);
+  const iWon: boolean | null = me ? me.is_winner : null;
 
   return (
     <div className="space-y-3">
@@ -38,11 +44,11 @@ export default async function ReplayPage({ params }: { params: Promise<{ id: str
         </span>
         <div className="ml-auto flex items-center gap-3">
           <MatchupTiles matchup={game.my_matchup ?? game.matchup} size={18} />
-          {game.i_won != null && (
+          {iWon != null && (
             <span
               className="font-data border px-2 py-[3px] text-[10px] font-semibold uppercase tracking-[0.14em]"
               style={
-                game.i_won
+                iWon
                   ? {
                       color: "var(--vespene)",
                       background: "var(--vespene-dim)",
@@ -55,7 +61,7 @@ export default async function ReplayPage({ params }: { params: Promise<{ id: str
                     }
               }
             >
-              {game.i_won ? "Victoria" : "Derrota"}
+              {iWon ? "Victoria" : "Derrota"}
             </span>
           )}
         </div>

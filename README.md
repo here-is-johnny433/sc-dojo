@@ -8,7 +8,22 @@ Plataforma personal de análisis de replays de **StarCraft: Brood War Remastered
 docker compose up -d --build
 ```
 
-La app queda en **http://localhost:3000**. La contraseña inicial está en `.env.initial-password.txt` (cámbiala con `pnpm set-password "nueva"` y reinicia: `docker compose restart web`).
+La app queda en **http://localhost:3000**. El primer arranque crea la base vacía: para tener con qué entrar, crea el usuario admin (una sola vez) con
+
+```bash
+pnpm migrate:multiuser --password "tu-contraseña"
+```
+
+que además migra el historial de la etapa mono-usuario (ver "Multi-usuario"). Después se entra con **correo + contraseña**; para cambiar una contraseña: `pnpm set-password <correo> "nueva"`.
+
+## Multi-usuario
+
+Cada jugador tiene su cuenta (correo + contraseña, rol `admin` o `player`) y una o más **cuentas de Battle.net** (alias) registradas. Al importar un replay, cada jugador se vincula por alias, así que una partida entre dos usuarios registrados aparece en el dojo de ambos con su propia perspectiva (victoria/derrota, APM, matchup).
+
+- **Estadísticas** (dashboard, lista de partidas): visibles entre jugadores, con un selector de jugador.
+- **Privado por usuario**: objetivos, notas del coach, chat, observaciones y comentarios del replay. El admin ve todo.
+- **Módulo admin** (`/admin`, solo rol admin): crear jugadores, cambiar rol, activar/desactivar y gestionar alias. Al añadir un alias, las partidas ya importadas con ese nombre se revinculan al instante (te dice cuántas). Para regenerar además sus observaciones: `pnpm reprocess-observations <correo>`.
+- Un alias pertenece a un solo jugador; el correo es la llave de la cuenta.
 
 ### Importar tus replays existentes (esta Mac)
 
@@ -122,7 +137,7 @@ redistribuir**. Cada máquina que corra el worker necesita generar los suyos con
 
 - `app/` — Next.js (dashboard, partidas, detalle con gráficas, chat, login)
 - `lib/ingest.ts` — pipeline: screp → derivaciones (build orders, observaciones heurísticas, evaluación de objetivo) → Postgres
-- `db/schema.sql` — esquema + vistas para Looker Studio (`v_my_games`, `v_matchup_stats`, `v_map_stats`, `v_monthly_trend`)
+- `db/schema.sql` — esquema (incluye `users`, `player_aliases` y la vista por jugador `v_player_games`) + vistas para Looker Studio (`v_my_games`, `v_matchup_stats`, `v_map_stats`, `v_monthly_trend`)
 - `resim/` — worker de re-simulación OpenBW (capa B) + `verify.js`, el decodificador de referencia del formato `DJR1`
 - `watchers/` — auto-subida por máquina (bash/launchd y PowerShell/Task Scheduler)
 - `Dockerfile` + `docker-compose.yml` — stack completo (Caddy + web con screp + Postgres 16)
@@ -133,4 +148,4 @@ Ver [README-DEPLOY.md](README-DEPLOY.md).
 
 ## Seguridad
 
-Single-user: login con bcrypt + cookie HMAC firmada, rate limit, middleware que protege todo; watchers con token secreto; uploads solo `.rep` con límite de tamaño y nombres re-generados por hash; el agente consulta la DB con un rol de **solo lectura**; Postgres sin puerto público por defecto.
+Login por usuario con bcrypt + cookie HMAC firmada (lleva id y rol; los datos privados se filtran por `user_id` en el servidor), rate limit por IP+correo, middleware que protege todo y bloquea `/admin` a quien no sea admin; watchers con token secreto; uploads solo `.rep` con límite de tamaño y nombres re-generados por hash; el agente consulta la DB con un rol de **solo lectura**; Postgres sin puerto público por defecto.

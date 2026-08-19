@@ -24,7 +24,6 @@ cp .env.example .env
 
 Edita `.env` de producción:
 - Genera secretos nuevos: `openssl rand -base64 32` para `POSTGRES_PASSWORD`, `READONLY_DB_PASSWORD`, `SESSION_SECRET`, `UPLOAD_TOKEN`.
-- `AUTH_PASSWORD_HASH`: genera en tu Mac con `pnpm set-password "tu-contraseña"` y copia el valor.
 - `ANTHROPIC_API_KEY`: tu key.
 - `COOKIE_SECURE=true` y `DOMAIN=dojo.tudominio.com`.
 
@@ -35,6 +34,39 @@ docker compose --profile prod up -d --build
 ```
 
 Caddy emite el certificado HTTPS automáticamente (Let's Encrypt). Verifica: `https://dojo.tudominio.com` → login.
+
+## 4b. Crear el usuario admin (bootstrap)
+
+El login es por **correo + contraseña**: la primera cuenta la crea `pnpm migrate:multiuser`, que corre desde tu Mac (la imagen de producción no lleva los scripts) contra la base del VPS por un túnel SSH:
+
+```bash
+# terminal 1 — túnel al Postgres del VPS (publica el puerto solo dentro del VPS)
+ssh -N -L 5433:127.0.0.1:5432 root@VPS
+
+# terminal 2 — en el repo, en tu Mac
+DATABASE_URL=postgres://dojo:POSTGRES_PASSWORD@127.0.0.1:5433/starcraft_dojo \
+  pnpm migrate:multiuser --password "tu-contraseña"
+```
+
+(El túnel necesita que el servicio `db` publique `127.0.0.1:5432:5432` en `docker-compose.yml` — el mismo mapeo que pide Looker Studio más abajo.)
+
+Crea `stephan.tinschert@gmail.com` con rol admin, registra los alias de `MY_ALIASES` y asigna al admin todo el historial que no tenga dueño. Es idempotente. Los demás jugadores se crean desde **/admin** en la UI; para recuperar una contraseña, por el mismo túnel: `DATABASE_URL=... pnpm set-password <correo> "nueva"`.
+
+### Upgrade de una instalación mono-usuario existente
+
+El esquema solo se aplica en la primera inicialización del volumen, así que en un despliegue que ya existía hay que aplicarlo a mano y luego migrar:
+
+```bash
+# en el VPS
+docker compose cp db/schema.sql db:/tmp/schema.sql
+docker compose exec db psql -U dojo -d starcraft_dojo -f /tmp/schema.sql
+# el init del rol readonly tampoco se re-ejecuta: retíralo de las tablas privadas
+docker compose exec db psql -U dojo -d starcraft_dojo -c "REVOKE SELECT ON users, player_aliases, agent_notes, training_goals, goal_checks, chat_conversations, chat_messages, game_observations, game_commentary FROM dojo_readonly;"
+# después, el bootstrap de arriba (reusa AUTH_PASSWORD_HASH y MY_ALIASES del .env)
+docker compose up -d --build   # el servicio web ya no necesita esas dos variables
+```
+
+Las cookies de sesión anteriores dejan de ser válidas (el token cambió de formato): todos vuelven a entrar con correo + contraseña.
 
 ## 5. Migrar tus datos locales (opcional)
 
