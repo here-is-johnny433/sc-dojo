@@ -16,6 +16,8 @@ const eslintConfig = defineConfig([
     // own package.json/node_modules and vendored Emscripten glue — not part of the
     // Next app and not covered by these rules.
     "resim/**",
+    // Claude Code worktrees/planes: copias de trabajo, no código de la app.
+    ".claude/**",
   ]),
 ]);
 

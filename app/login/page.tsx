@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -16,7 +17,7 @@ export default function LoginPage() {
     const res = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ email, password }),
     });
     if (res.ok) {
       router.push("/");
@@ -39,19 +40,34 @@ export default function LoginPage() {
           Tu sala de entrenamiento de Brood War.
         </p>
         <label className="mb-1.5 block text-[12px] font-medium text-[var(--ink-dim)]">
+          Correo
+        </label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="username"
+          autoFocus
+          className="mb-3 w-full"
+        />
+        <label className="mb-1.5 block text-[12px] font-medium text-[var(--ink-dim)]">
           Contraseña
         </label>
         <input
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          autoFocus
+          autoComplete="current-password"
           className="mb-4 w-full"
         />
         {error && (
           <p className="mb-4 text-[12px] text-[var(--supply-red)]">{error}</p>
         )}
-        <button type="submit" disabled={busy || !password} className="btn btn-psi w-full justify-center">
+        <button
+          type="submit"
+          disabled={busy || !email || !password}
+          className="btn btn-psi w-full justify-center"
+        >
           {busy ? "Entrando…" : "Entrar al dojo"}
         </button>
       </form>

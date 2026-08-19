@@ -238,7 +238,14 @@ export async function resimStatus(gameId: string): Promise<ResimStatus> {
   }
 }
 
-export async function buildViewerData(gameId: string): Promise<ViewerData | null> {
+/**
+ * `viewerId` fija la perspectiva (isMe, fog). Si ese usuario no jugó la
+ * partida, nadie es "yo" y el visor queda como observador neutral.
+ */
+export async function buildViewerData(
+  gameId: string,
+  viewerId: number
+): Promise<ViewerData | null> {
   const g = await db().query(
     "SELECT id, frames, duration_seconds, map_name, json_path FROM games WHERE id = $1",
     [gameId]
@@ -248,8 +255,8 @@ export async function buildViewerData(gameId: string): Promise<ViewerData | null
 
   const raw = JSON.parse(await fs.readFile(game.json_path, "utf8")) as RawReplay;
   const mine = await db().query(
-    "SELECT player_id FROM game_players WHERE game_id = $1 AND is_me",
-    [gameId]
+    "SELECT player_id FROM game_players WHERE game_id = $1 AND user_id = $2",
+    [gameId, viewerId]
   );
   const myIds = new Set<number>(mine.rows.map((r) => r.player_id));
 

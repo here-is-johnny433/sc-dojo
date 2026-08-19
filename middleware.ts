@@ -8,17 +8,32 @@ export async function middleware(req: NextRequest) {
 
   if (PUBLIC_PATHS.includes(pathname)) return NextResponse.next();
 
-  const hasSession = await verifySessionToken(req.cookies.get(sessionCookieName())?.value);
+  const session = await verifySessionToken(req.cookies.get(sessionCookieName())?.value);
 
   // Watchers authenticate uploads with a token header instead of a cookie.
   if (pathname === "/api/upload") {
-    if (hasSession || validUploadToken(req.headers.get("x-upload-token"))) {
+    if (session || validUploadToken(req.headers.get("x-upload-token"))) {
       return NextResponse.next();
     }
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  if (hasSession) return NextResponse.next();
+  if (session) {
+    // Admin area: the role travels in the signed token, so no DB hit here.
+    // Handlers re-check with requireAdmin() against the live row.
+    if (pathname.startsWith("/admin") || pathname.startsWith("/api/admin")) {
+      if (session.role !== "admin") {
+        if (pathname.startsWith("/api/")) {
+          return NextResponse.json({ error: "forbidden" }, { status: 403 });
+        }
+        const home = req.nextUrl.clone();
+        home.pathname = "/";
+        home.search = "";
+        return NextResponse.redirect(home);
+      }
+    }
+    return NextResponse.next();
+  }
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });

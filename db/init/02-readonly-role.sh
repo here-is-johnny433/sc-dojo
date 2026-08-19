@@ -16,4 +16,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
   GRANT USAGE ON SCHEMA public TO dojo_readonly;
   GRANT SELECT ON ALL TABLES IN SCHEMA public TO dojo_readonly;
   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dojo_readonly;
+  -- Datos privados por usuario (y hashes de contraseña): fuera del alcance del
+  -- query_db del coach, que es el único consumidor de este rol. El blocklist de
+  -- la app es la primera barrera; esto la respalda a nivel de base.
+  REVOKE SELECT ON users, player_aliases, agent_notes, training_goals, goal_checks,
+    chat_conversations, chat_messages, game_observations, game_commentary
+    FROM dojo_readonly;
 EOSQL
