@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { knownPlayers } from "@/lib/queries";
+import { requireUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 export default async function PlayersPage() {
+  const user = await requireUser();
   const players = await knownPlayers();
 
   return (
@@ -34,10 +36,10 @@ export default async function PlayersPage() {
                   <Link
                     href={`/players/${encodeURIComponent(p.name)}`}
                     className="font-medium hover:underline"
-                    style={p.is_me ? { color: "var(--psi)" } : undefined}
+                    style={p.user_id === user.id ? { color: "var(--psi)" } : undefined}
                   >
                     {p.name}
-                    {p.is_me && (
+                    {p.user_id === user.id && (
                       <span className="ml-2 text-[10px] uppercase tracking-wider text-[var(--ink-faint)]">
                         yo
                       </span>

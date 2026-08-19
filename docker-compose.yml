@@ -31,11 +31,12 @@ services:
       DATABASE_URL: postgres://dojo:${POSTGRES_PASSWORD}@db:5432/starcraft_dojo
       DATABASE_URL_RO: postgres://dojo_readonly:${READONLY_DB_PASSWORD}@db:5432/starcraft_dojo
       SESSION_SECRET: ${SESSION_SECRET}
-      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH}
       UPLOAD_TOKEN: ${UPLOAD_TOKEN}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      MY_ALIASES: ${MY_ALIASES}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # AUTH_PASSWORD_HASH y MY_ALIASES ya no los usa la app: identidad y alias
+      # viven en la base (users / player_aliases). Solo los lee una vez
+      # `pnpm migrate:multiuser` al migrar del modo mono-usuario.
     volumes:
       - replays:/data/replays
       # Full (untruncated) tileset graphics for terrain rendering — generated

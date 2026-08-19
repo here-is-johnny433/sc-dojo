@@ -144,6 +144,58 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ---------- Multi-user: users, aliases y ownership ----------
+
+CREATE TABLE IF NOT EXISTS users (
+  id            BIGSERIAL PRIMARY KEY,
+  email         TEXT NOT NULL,                     -- llave única del jugador (case-insensitive)
+  name          TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'player' CHECK (role IN ('admin','player')),
+  password_hash TEXT NOT NULL,
+  active        BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
+
+-- Cuentas de Battle.net de cada jugador; un alias pertenece a un solo jugador.
+CREATE TABLE IF NOT EXISTS player_aliases (
+  id      BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  alias   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_unique ON player_aliases (LOWER(alias));
+
+ALTER TABLE game_players       ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_gp_user ON game_players(user_id) WHERE user_id IS NOT NULL;
+ALTER TABLE training_goals     ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE agent_notes        ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE game_observations  ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE game_commentary    ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+
+-- Una meta activa POR USUARIO (reemplaza el índice global idx_one_active_goal).
+DROP INDEX IF EXISTS idx_one_active_goal;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_goal_per_user
+  ON training_goals(user_id) WHERE status = 'active';
+
+-- Perspectiva por jugador registrado: una fila por (partida, usuario). Sustituye
+-- el uso de v_my_games en la app; una replay entre dos usuarios registrados
+-- produce una fila por cada uno con su propio resultado.
+CREATE OR REPLACE VIEW v_player_games AS
+SELECT g.id, gp.user_id, g.played_at, g.map_name, g.game_type, g.matchup,
+       g.duration_seconds, g.is_practice, g.source,
+       gp.race AS my_race, gp.is_winner AS i_won, gp.name AS my_alias,
+       gp.apm, gp.eapm, gp.hotkey_pct, gp.team AS my_team,
+       (SELECT string_agg(LEFT(COALESCE(p2.race,'?'),1), '' ORDER BY LEFT(COALESCE(p2.race,'?'),1))
+          FROM game_players p2 WHERE p2.game_id = g.id AND p2.team = gp.team)
+       || ' vs ' ||
+       (SELECT string_agg(o.letters, '+' ORDER BY o.letters)
+          FROM (SELECT string_agg(LEFT(COALESCE(p3.race,'?'),1), '' ORDER BY LEFT(COALESCE(p3.race,'?'),1)) AS letters
+                  FROM game_players p3 WHERE p3.game_id = g.id AND p3.team <> gp.team
+                 GROUP BY p3.team) o) AS my_matchup
+FROM games g
+JOIN game_players gp ON gp.game_id = g.id AND gp.user_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS chat_messages (
   id              BIGSERIAL PRIMARY KEY,
   conversation_id BIGINT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,

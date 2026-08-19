@@ -1,5 +1,15 @@
-// Single-user auth: bcrypt-verified login issues an HMAC-signed, expiring
-// session cookie. Web Crypto only, so verification also runs in middleware.
+// Auth: bcrypt-verified login issues an HMAC-signed, expiring session cookie
+// carrying the user id and role. Web Crypto only and no pg import, so
+// verification also runs in middleware (edge runtime) — anything that needs the
+// database lives in lib/session.ts instead.
+
+export type Role = "admin" | "player";
+
+export interface SessionPayload {
+  userId: number;
+  role: Role;
+  exp: number;
+}
 
 const SESSION_COOKIE = "dojo_session";
 const SESSION_DAYS = 30;
@@ -22,21 +32,25 @@ async function hmac(payload: string): Promise<string> {
   return Buffer.from(sig).toString("base64url");
 }
 
-export async function createSessionToken(): Promise<string> {
+export async function createSessionToken(userId: number, role: Role): Promise<string> {
   const exp = Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000;
-  return `${exp}.${await hmac(`session:${exp}`)}`;
+  return `${userId}.${role}.${exp}.${await hmac(`session:${userId}:${role}:${exp}`)}`;
 }
 
-export async function verifySessionToken(token: string | undefined): Promise<boolean> {
-  if (!token) return false;
-  const [expStr, sig] = token.split(".");
+export async function verifySessionToken(
+  token: string | undefined
+): Promise<SessionPayload | null> {
+  if (!token) return null;
+  const [idStr, role, expStr, sig] = token.split(".");
+  const userId = Number(idStr);
   const exp = Number(expStr);
-  if (!expStr || !sig || !Number.isFinite(exp) || exp < Date.now()) return false;
-  const expected = await hmac(`session:${exp}`);
-  if (sig.length !== expected.length) return false;
+  if (!sig || !Number.isInteger(userId) || !Number.isFinite(exp) || exp < Date.now()) return null;
+  if (role !== "admin" && role !== "player") return null;
+  const expected = await hmac(`session:${userId}:${role}:${exp}`);
+  if (sig.length !== expected.length) return null;
   let diff = 0;
   for (let i = 0; i < sig.length; i++) diff |= sig.charCodeAt(i) ^ expected.charCodeAt(i);
-  return diff === 0;
+  return diff === 0 ? { userId, role, exp } : null;
 }
 
 export function sessionCookieName(): string {
@@ -61,28 +75,33 @@ export function validUploadToken(header: string | null): boolean {
   return diff === 0;
 }
 
-// -- login rate limit (per-IP, in-memory; single-instance app) --
+// -- login rate limit (per IP + email, in-memory; single-instance app) --
 const attempts = new Map<string, { count: number; resetAt: number }>();
 const MAX_ATTEMPTS = 5;
 const WINDOW_MS = 15 * 60 * 1000;
 
-export function loginRateLimited(ip: string): boolean {
+function attemptKey(ip: string, email: string): string {
+  return `${ip}:${email.toLowerCase()}`;
+}
+
+export function loginRateLimited(ip: string, email: string): boolean {
   const now = Date.now();
-  const entry = attempts.get(ip);
+  const entry = attempts.get(attemptKey(ip, email));
   if (!entry || entry.resetAt < now) return false;
   return entry.count >= MAX_ATTEMPTS;
 }
 
-export function recordLoginFailure(ip: string): void {
+export function recordLoginFailure(ip: string, email: string): void {
   const now = Date.now();
-  const entry = attempts.get(ip);
+  const key = attemptKey(ip, email);
+  const entry = attempts.get(key);
   if (!entry || entry.resetAt < now) {
-    attempts.set(ip, { count: 1, resetAt: now + WINDOW_MS });
+    attempts.set(key, { count: 1, resetAt: now + WINDOW_MS });
   } else {
     entry.count++;
   }
 }
 
-export function clearLoginFailures(ip: string): void {
-  attempts.delete(ip);
+export function clearLoginFailures(ip: string, email: string): void {
+  attempts.delete(attemptKey(ip, email));
 }

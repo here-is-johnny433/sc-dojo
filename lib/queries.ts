@@ -1,4 +1,5 @@
 import { db } from "./db";
+import type { SessionUser } from "./session";
 
 export interface GameRow {
   id: string;
@@ -18,51 +19,80 @@ export interface GameRow {
   my_alias: string | null;
 }
 
-export async function recentGames(limit = 50, offset = 0): Promise<GameRow[]> {
+export async function recentGames(userId: number, limit = 50, offset = 0): Promise<GameRow[]> {
   const r = await db().query(
-    `SELECT * FROM v_my_games ORDER BY played_at DESC NULLS LAST LIMIT $1 OFFSET $2`,
-    [limit, offset]
+    `SELECT * FROM v_player_games WHERE user_id = $1
+     ORDER BY played_at DESC NULLS LAST LIMIT $2 OFFSET $3`,
+    [userId, limit, offset]
   );
   return r.rows;
 }
 
-export async function overviewStats() {
-  const r = await db().query(`
-    SELECT COUNT(*)::int AS games,
-           COUNT(*) FILTER (WHERE i_won)::int AS wins,
-           COUNT(*) FILTER (WHERE i_won IS NOT NULL)::int AS decided,
-           ROUND(AVG(apm))::int AS avg_apm,
-           ROUND(AVG(eapm))::int AS avg_eapm,
-           ROUND(AVG(hotkey_pct)::numeric, 1)::float AS avg_hotkey_pct
-    FROM v_my_games WHERE NOT is_practice`);
+export async function overviewStats(userId: number) {
+  const r = await db().query(
+    `SELECT COUNT(*)::int AS games,
+            COUNT(*) FILTER (WHERE i_won)::int AS wins,
+            COUNT(*) FILTER (WHERE i_won IS NOT NULL)::int AS decided,
+            ROUND(AVG(apm))::int AS avg_apm,
+            ROUND(AVG(eapm))::int AS avg_eapm,
+            ROUND(AVG(hotkey_pct)::numeric, 1)::float AS avg_hotkey_pct
+     FROM v_player_games WHERE user_id = $1 AND NOT is_practice`,
+    [userId]
+  );
   return r.rows[0];
 }
 
-export async function matchupStats() {
+export async function matchupStats(userId: number) {
   const r = await db().query(
-    `SELECT * FROM v_matchup_stats ORDER BY games DESC`
+    `SELECT my_matchup,
+            COUNT(*)::int AS games,
+            COUNT(*) FILTER (WHERE i_won)::int AS wins,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE i_won) / NULLIF(COUNT(*) FILTER (WHERE i_won IS NOT NULL), 0), 1) AS winrate_pct,
+            ROUND(AVG(apm)) AS avg_apm
+     FROM v_player_games WHERE user_id = $1 AND NOT is_practice
+     GROUP BY my_matchup ORDER BY games DESC`,
+    [userId]
   );
   return r.rows;
 }
 
-export async function mapStats() {
-  const r = await db().query(`SELECT * FROM v_map_stats ORDER BY games DESC LIMIT 8`);
+export async function mapStats(userId: number) {
+  const r = await db().query(
+    `SELECT map_name,
+            COUNT(*)::int AS games,
+            COUNT(*) FILTER (WHERE i_won)::int AS wins,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE i_won) / NULLIF(COUNT(*) FILTER (WHERE i_won IS NOT NULL), 0), 1) AS winrate_pct
+     FROM v_player_games WHERE user_id = $1 AND NOT is_practice
+     GROUP BY map_name ORDER BY games DESC LIMIT 8`,
+    [userId]
+  );
   return r.rows;
 }
 
-export async function monthlyTrend() {
-  const r = await db().query(`SELECT * FROM v_monthly_trend`);
+export async function monthlyTrend(userId: number) {
+  const r = await db().query(
+    `SELECT date_trunc('month', played_at)::date AS month,
+            COUNT(*)::int AS games,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE i_won) / NULLIF(COUNT(*) FILTER (WHERE i_won IS NOT NULL), 0), 1) AS winrate_pct,
+            ROUND(AVG(apm)) AS avg_apm,
+            ROUND(AVG(eapm)) AS avg_eapm
+     FROM v_player_games WHERE user_id = $1 AND NOT is_practice
+     GROUP BY 1 ORDER BY 1`,
+    [userId]
+  );
   return r.rows;
 }
 
-export async function activeGoal() {
-  const r = await db().query(`
-    SELECT g.*,
+export async function activeGoal(userId: number) {
+  const r = await db().query(
+    `SELECT g.*,
       (SELECT COUNT(*)::int FROM goal_checks c WHERE c.goal_id = g.id) AS checks,
       (SELECT COUNT(*)::int FROM goal_checks c WHERE c.goal_id = g.id AND c.passed) AS passed_checks,
       (SELECT COALESCE(json_agg(json_build_object('game_id', c.game_id, 'measured', c.measured_value, 'passed', c.passed) ORDER BY c.id DESC), '[]'::json)
          FROM (SELECT * FROM goal_checks WHERE goal_id = g.id ORDER BY id DESC LIMIT 10) c) AS recent_checks
-    FROM training_goals g WHERE g.status = 'active' LIMIT 1`);
+    FROM training_goals g WHERE g.status = 'active' AND g.user_id = $1 LIMIT 1`,
+    [userId]
+  );
   return r.rows[0] ?? null;
 }
 
@@ -74,6 +104,12 @@ export function goalStreak(recentChecks: { passed: boolean }[]): number {
     else break;
   }
   return streak;
+}
+
+/** Jugadores activos, para el selector de perspectiva del dashboard. */
+export async function listPlayers(): Promise<{ id: number; name: string; role: string }[]> {
+  const r = await db().query("SELECT id, name, role FROM users WHERE active ORDER BY name");
+  return r.rows.map((u) => ({ id: Number(u.id), name: u.name, role: u.role }));
 }
 
 // ---------- Espectro de rendimiento (player_scores) ----------
@@ -118,7 +154,7 @@ export async function knownPlayers() {
   const r = await db().query(
     `SELECT p.name,
             COUNT(*)::int AS games,
-            BOOL_OR(p.is_me) AS is_me,
+            MAX(p.user_id)::int AS user_id,
             MAX(g.played_at) AS last_played
      FROM game_players p JOIN games g ON g.id = p.game_id
      WHERE NOT p.is_computer
@@ -127,7 +163,7 @@ export async function knownPlayers() {
   return r.rows;
 }
 
-export async function gameDetail(id: string) {
+export async function gameDetail(id: string, viewer: SessionUser) {
   const game = await db().query(`SELECT * FROM games WHERE id = $1`, [id]);
   if (!game.rowCount) return null;
   const players = await db().query(
@@ -139,9 +175,11 @@ export async function gameDetail(id: string) {
      FROM build_order_events WHERE game_id = $1 ORDER BY frame`,
     [id]
   );
+  // Las observaciones son privadas: solo su dueño (o un admin) las ve.
   const observations = await db().query(
-    `SELECT severity, text FROM game_observations WHERE game_id = $1 ORDER BY id`,
-    [id]
+    `SELECT severity, text FROM game_observations
+     WHERE game_id = $1 AND ($2::boolean OR user_id = $3) ORDER BY id`,
+    [id, viewer.role === "admin", viewer.id]
   );
   return {
     game: game.rows[0],

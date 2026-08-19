@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { db } from "@/lib/db";
 import { fmtTime } from "@/lib/bw";
-import { GameRow } from "@/lib/queries";
+import { GameRow, listPlayers } from "@/lib/queries";
+import { requireUser } from "@/lib/session";
 import { MatchupTiles } from "@/components/RaceTile";
+import { PlayerSwitcher } from "@/components/PlayerSwitcher";
 import { UploadDrop } from "@/components/UploadDrop";
 
 export const dynamic = "force-dynamic";
@@ -11,11 +13,15 @@ interface Filters {
   map?: string;
   matchup?: string;
   result?: string;
+  player?: string;
 }
 
-async function filteredGames(f: Filters): Promise<(GameRow & { overall: number | null })[]> {
-  const where: string[] = [];
-  const params: unknown[] = [];
+async function filteredGames(
+  userId: number,
+  f: Filters
+): Promise<(GameRow & { overall: number | null })[]> {
+  const where: string[] = ["v.user_id = $1"];
+  const params: unknown[] = [userId];
   if (f.map) {
     params.push(f.map);
     where.push(`v.map_name = $${params.length}`);
@@ -28,10 +34,10 @@ async function filteredGames(f: Filters): Promise<(GameRow & { overall: number |
   if (f.result === "loss") where.push(`v.i_won = false`);
   if (f.result === "practice") where.push(`v.is_practice`);
   const sql = `SELECT v.*, s.overall
-               FROM v_my_games v
-               JOIN game_players gp ON gp.game_id = v.id AND gp.is_me
+               FROM v_player_games v
+               JOIN game_players gp ON gp.game_id = v.id AND gp.user_id = v.user_id
                LEFT JOIN player_scores s ON s.game_id = v.id AND s.player_id = gp.player_id
-               ${where.length ? "WHERE " + where.join(" AND ") : ""}
+               WHERE ${where.join(" AND ")}
                ORDER BY v.played_at DESC NULLS LAST LIMIT 200`;
   return (await db().query(sql, params)).rows;
 }
@@ -42,9 +48,17 @@ export default async function GamesPage({
   searchParams: Promise<Filters>;
 }) {
   const filters = await searchParams;
+  const user = await requireUser();
+  const players = await listPlayers();
+  const requested = Number(filters.player);
+  const viewed = players.find((p) => p.id === requested) ?? { id: user.id, name: user.name };
+
   const [games, mapsR] = await Promise.all([
-    filteredGames(filters),
-    db().query(`SELECT DISTINCT map_name FROM v_my_games WHERE map_name IS NOT NULL ORDER BY 1`),
+    filteredGames(viewed.id, filters),
+    db().query(
+      `SELECT DISTINCT map_name FROM v_player_games WHERE user_id = $1 AND map_name IS NOT NULL ORDER BY 1`,
+      [viewed.id]
+    ),
   ]);
 
   const qs = (patch: Partial<Filters>) => {
@@ -59,9 +73,12 @@ export default async function GamesPage({
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Partidas</h1>
+          <h1 className="text-xl font-semibold tracking-tight">
+            Partidas{viewed.id === user.id ? "" : ` de ${viewed.name}`}
+          </h1>
           <p className="text-[12px] text-[var(--ink-faint)]">{games.length} en vista</p>
         </div>
+        <PlayerSwitcher players={players} value={viewed.id} sessionId={user.id} />
         <div className="flex flex-wrap items-center gap-2 text-[12px]">
           {/* filters as links keep the page a pure server component */}
           <div className="flex overflow-hidden rounded-md border border-[var(--grid-line)]">

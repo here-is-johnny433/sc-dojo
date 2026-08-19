@@ -4,6 +4,7 @@ import { promisify } from "util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { db, dbRO } from "./db";
 import { fmtTime } from "./bw";
+import type { SessionUser } from "./session";
 import { parseResim, resimFilePath, shortUnitName, type Resim } from "./resim-format";
 import { resimStatus } from "./viewer-data";
 
@@ -13,7 +14,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: "query_db",
     description:
-      "Ejecuta una consulta SQL de SOLO LECTURA (SELECT o WITH) sobre la base de datos de partidas. Tablas: games, game_players, build_order_events, game_observations, agent_notes, training_goals, goal_checks. Vistas útiles: v_my_games (mis partidas con mis stats), v_matchup_stats, v_map_stats, v_monthly_trend. Máximo 200 filas.",
+      "Ejecuta una consulta SQL de SOLO LECTURA (SELECT o WITH) sobre la base de datos de partidas. Tablas: games, game_players, build_order_events. Vista útil: v_player_games (una fila por partida y jugador registrado, con sus stats: apm, eapm, hotkey_pct, i_won, my_matchup, my_race) — filtra SIEMPRE por user_id del alumno. Las tablas privadas (notas, objetivos, observaciones, chats, usuarios) no son consultables aquí: usa las herramientas dedicadas. Máximo 200 filas.",
     input_schema: {
       type: "object" as const,
       properties: { sql: { type: "string", description: "Consulta SELECT" } },
@@ -124,11 +125,18 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
 ];
 
 const FORBIDDEN_SQL = /\b(insert|update|delete|drop|alter|create|grant|revoke|truncate|copy|vacuum|analyze|set|do|call|execute)\b/i;
+// Datos privados de cada jugador: se sirven por herramientas con dueño, nunca
+// por SQL libre (una consulta del coach de un usuario vería la de los demás).
+const PRIVATE_TABLES =
+  /\b(agent_notes|training_goals|goal_checks|chat_conversations|chat_messages|users|player_aliases|game_observations|game_commentary)\b/i;
 
 async function runQuery(sql: string): Promise<string> {
   const trimmed = sql.trim().replace(/;+\s*$/, "");
   if (!/^(select|with)\b/i.test(trimmed) || FORBIDDEN_SQL.test(trimmed) || trimmed.includes(";")) {
     return "ERROR: solo se permiten consultas SELECT de una sola sentencia.";
+  }
+  if (PRIVATE_TABLES.test(trimmed)) {
+    return "ERROR: esa tabla es privada. Usa list_notes, get_active_goal o get_replay_details.";
   }
   const client = await dbRO().connect();
   try {
@@ -143,7 +151,9 @@ async function runQuery(sql: string): Promise<string> {
   }
 }
 
-export async function replayDetails(gameId: string): Promise<string> {
+/** Detalle de una partida desde la perspectiva de `userId` (resultado y
+ *  observaciones suyas; el resto de los datos son públicos). */
+export async function replayDetails(gameId: string, userId: number): Promise<string> {
   if (!/^[a-f0-9]{16}$/.test(gameId)) return "ERROR: game_id inválido";
   const g = await db().query("SELECT * FROM games WHERE id = $1", [gameId]);
   if (!g.rowCount) return "ERROR: partida no encontrada";
@@ -185,8 +195,12 @@ export async function replayDetails(gameId: string): Promise<string> {
     )
   ).rows;
   const observations = (
-    await db().query("SELECT severity, text FROM game_observations WHERE game_id = $1", [gameId])
+    await db().query(
+      "SELECT severity, text FROM game_observations WHERE game_id = $1 AND user_id = $2",
+      [gameId, userId]
+    )
   ).rows;
+  const mine = players.find((p) => Number(p.user_id) === userId);
 
   const buildOrders: Record<string, string[]> = {};
   for (const e of events) {
@@ -200,7 +214,7 @@ export async function replayDetails(gameId: string): Promise<string> {
     game: {
       id: game.id, map: game.map_name, played_at: game.played_at, type: game.game_type,
       duration: fmtTime(game.duration_seconds), matchup: game.my_matchup ?? game.matchup,
-      result: game.i_won === null ? "unknown" : game.i_won ? "win" : "loss",
+      result: mine?.is_winner == null ? "unknown" : mine.is_winner ? "win" : "loss",
       is_practice: game.is_practice,
     },
     players, observations, chat, leaves, build_orders: buildOrders,
@@ -334,49 +348,58 @@ export async function battleReport(gameId: string): Promise<string> {
   });
 }
 
-export async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
+export async function executeTool(
+  name: string,
+  input: Record<string, unknown>,
+  user: SessionUser
+): Promise<string> {
   switch (name) {
     case "query_db":
       return runQuery(String(input.sql ?? ""));
     case "get_replay_details":
-      return replayDetails(String(input.game_id ?? ""));
+      return replayDetails(String(input.game_id ?? ""), user.id);
     case "get_battle_report":
       return battleReport(String(input.game_id ?? ""));
     case "list_notes": {
       const r = await db().query(
-        "SELECT id, area, title, content, updated_at FROM agent_notes ORDER BY area, updated_at DESC"
+        `SELECT id, area, title, content, updated_at FROM agent_notes
+         WHERE user_id = $1 ORDER BY area, updated_at DESC`,
+        [user.id]
       );
       return JSON.stringify(r.rows);
     }
     case "save_note": {
       const r = await db().query(
-        "INSERT INTO agent_notes (area, title, content) VALUES ($1,$2,$3) RETURNING id",
-        [input.area, input.title, input.content]
+        "INSERT INTO agent_notes (user_id, area, title, content) VALUES ($1,$2,$3,$4) RETURNING id",
+        [user.id, input.area, input.title, input.content]
       );
       return JSON.stringify({ ok: true, id: r.rows[0].id });
     }
     case "update_note": {
       const r = await db().query(
-        "UPDATE agent_notes SET content = $2, updated_at = now() WHERE id = $1 RETURNING id",
-        [input.id, input.content]
+        `UPDATE agent_notes SET content = $3, updated_at = now()
+         WHERE id = $1 AND user_id = $2 RETURNING id`,
+        [input.id, user.id, input.content]
       );
       return r.rowCount ? JSON.stringify({ ok: true }) : "ERROR: nota no encontrada";
     }
     case "get_active_goal": {
-      const r = await db().query(`
-        SELECT g.*, COALESCE(json_agg(json_build_object(
+      const r = await db().query(
+        `SELECT g.*, COALESCE(json_agg(json_build_object(
                  'game_id', c.game_id, 'measured', c.measured_value, 'passed', c.passed)
                  ORDER BY c.id DESC) FILTER (WHERE c.id IS NOT NULL), '[]'::json) AS checks
-        FROM training_goals g LEFT JOIN goal_checks c ON c.goal_id = g.id
-        WHERE g.status = 'active' GROUP BY g.id LIMIT 1`);
+         FROM training_goals g LEFT JOIN goal_checks c ON c.goal_id = g.id
+         WHERE g.status = 'active' AND g.user_id = $1 GROUP BY g.id LIMIT 1`,
+        [user.id]
+      );
       return JSON.stringify(r.rows[0] ?? null);
     }
     case "create_goal": {
       try {
         const r = await db().query(
-          `INSERT INTO training_goals (area, title, metric_key, target_value, comparator, streak_required)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-          [input.area, input.title, input.metric_key, input.target_value,
+          `INSERT INTO training_goals (user_id, area, title, metric_key, target_value, comparator, streak_required)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+          [user.id, input.area, input.title, input.metric_key, input.target_value,
            input.comparator ?? ">=", input.streak_required ?? 5]
         );
         return JSON.stringify({ ok: true, id: r.rows[0].id });
@@ -386,9 +409,9 @@ export async function executeTool(name: string, input: Record<string, unknown>):
     }
     case "complete_goal": {
       const r = await db().query(
-        `UPDATE training_goals SET status = $2, achieved_at = CASE WHEN $2 = 'achieved' THEN now() END
-         WHERE id = $1 AND status = 'active' RETURNING id`,
-        [input.goal_id, input.status]
+        `UPDATE training_goals SET status = $3, achieved_at = CASE WHEN $3 = 'achieved' THEN now() END
+         WHERE id = $1 AND user_id = $2 AND status = 'active' RETURNING id`,
+        [input.goal_id, user.id, input.status]
       );
       return r.rowCount ? JSON.stringify({ ok: true }) : "ERROR: no hay objetivo activo con ese id";
     }

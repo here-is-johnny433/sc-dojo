@@ -11,9 +11,10 @@ const LINKS = [
   { href: "/chat", label: "Coach" },
 ];
 
-export function CommandBar() {
+export function CommandBar({ user }: { user: { name: string; role: string } }) {
   const pathname = usePathname();
   const router = useRouter();
+  const links = user.role === "admin" ? [...LINKS, { href: "/admin", label: "Admin" }] : LINKS;
 
   async function logout() {
     await fetch("/api/logout", { method: "POST" });
@@ -35,7 +36,7 @@ export function CommandBar() {
           <span className="text-[15px] font-bold tracking-tight">DOJO</span>
         </Link>
         <nav className="flex items-center gap-1">
-          {LINKS.map((l) => {
+          {links.map((l) => {
             const active =
               l.href === "/" ? pathname === "/" : pathname.startsWith(l.href);
             return (
@@ -60,7 +61,7 @@ export function CommandBar() {
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <span className="font-data hidden text-[11px] text-[var(--ink-faint)] sm:block">
-            EdgarallanPulp
+            {user.name}
           </span>
           <button onClick={logout} className="btn px-3 py-1 text-[12px]">
             Salir

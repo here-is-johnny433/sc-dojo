@@ -12,6 +12,8 @@
     "reparse-maps": "tsx scripts/reparse-maps.ts",
     "set-password": "tsx scripts/set-password.ts",
     "scores": "tsx scripts/compute-scores.ts",
+    "migrate:multiuser": "tsx scripts/migrate-multiuser.ts",
+    "reprocess-observations": "tsx scripts/reprocess-observations.ts",
     "db:setup": "psql \"$DATABASE_URL\" -f db/schema.sql"
   },
   "dependencies": {
