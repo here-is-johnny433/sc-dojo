@@ -1,0 +1,64 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dojo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: starcraft_dojo
+      READONLY_DB_PASSWORD: ${READONLY_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/init/02-readonly-role.sh:/docker-entrypoint-initdb.d/02-readonly-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dojo -d starcraft_dojo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Postgres is NOT published to the host by default. For Looker Studio on the
+    # VPS, uncomment the mapping below AND restrict 5432 with your firewall.
+    # ports:
+    #   - "5432:5432"
+
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://dojo:${POSTGRES_PASSWORD}@db:5432/starcraft_dojo
+      DATABASE_URL_RO: postgres://dojo_readonly:${READONLY_DB_PASSWORD}@db:5432/starcraft_dojo
+      SESSION_SECRET: ${SESSION_SECRET}
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH}
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MY_ALIASES: ${MY_ALIASES}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - replays:/data/replays
+    ports:
+      - "127.0.0.1:3000:3000"   # localhost only — safe on the VPS too (Caddy proxies internally)
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["prod"]          # only started on the VPS: docker compose --profile prod up -d
+    depends_on:
+      - web
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  replays:
+  caddy_data:
+  caddy_config:
