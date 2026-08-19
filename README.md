@@ -49,11 +49,81 @@ cd watchers\windows
 
 El `UPLOAD_TOKEN` está en tu `.env`. Corre cada 5 minutos; el servidor deduplica por hash.
 
+## Capa B — re-simulación (OpenBW)
+
+screp te da los **comandos** de la partida. La capa B te da el **estado del juego**:
+cada replay se vuelve a simular con [OpenBW](https://github.com/OpenBW/openbw) (el
+build WASM de [titan-reactor](https://github.com/alexpineda/titan-reactor)) y se
+muestrea **cada 12 frames** (~2 muestras por segundo de juego), guardando posición,
+tipo, dueño y vida de cada unidad viva, más minerales/gas/supply por jugador. Eso es
+lo que reproduce el visor de replays.
+
+### Flujo
+
+1. **Extraer los datos del juego** (una sola vez por máquina, necesita SC:R instalado):
+
+   ```bash
+   pnpm extract-bwdata                     # lee el CASC de /Applications/StarCraft
+   pnpm extract-bwdata --sc-dir "C:\Program Files (x86)\StarCraft"
+   ```
+
+   Deja ~46 MB (1149 archivos) en `./data/bwdata/`. Requiere el addon nativo
+   `casclib`, que solo hace falta para este paso — mira la cabecera de
+   `scripts/extract-bwdata.ts` para la receta de compilación en macOS. Si ya tienes
+   un volcado crudo de otra máquina: `pnpm extract-bwdata --from-dir <dir>`.
+
+2. **Levantar el worker**:
+
+   ```bash
+   docker compose up -d --build resim
+   docker compose logs -f resim
+   ```
+
+   Cada 15 s toma una partida con `resim_status = 'pending'`, la simula (~1-4 s por
+   replay, timeout duro de 120 s en un proceso hijo aparte) y escribe
+   `/data/replays/resim/<gameId>.bin.gz`. Estados en la tabla `games`:
+   `pending → running → done | failed` (`resim_error` guarda el motivo), y `skipped`
+   para las partidas de práctica: **OpenBW no implementa la IA de computadora**, así
+   que cualquier replay con un jugador Computer aborta y se descarta antes de simular.
+
+   ```sql
+   SELECT resim_status, COUNT(*) FROM games GROUP BY 1;
+   ```
+
+   Para re-simular todo tras un cambio de formato:
+   `UPDATE games SET resim_status='pending' WHERE NOT is_practice;`
+
+3. **Comprobar un archivo** (decodificador de referencia del formato):
+
+   ```bash
+   node resim/verify.js data/.../<gameId>.bin.gz 9000
+   ```
+
+### Formato `DJR1`
+
+Gzip de un buffer little-endian: magic `"DJR1"`, `uint32 headerLen`, header JSON
+(`version`, `gameId`, `frames`, `fps`, `sampleStep`, `sampleCount`, `players[]` con
+el **PlayerID de screp**, y `types` con nombre/edificio/tamaño de cada typeId que
+aparece), y luego una muestra por sample: `uint32 frame`, un bloque de
+`uint16 minerals, gas, supplyUsed, supplyMax` por jugador (supply en medias
+unidades, como internamente en BW), `uint16 unitCount` y un registro de 10 bytes por
+unidad (`tag, typeId, ownerIdx, x, y, hpPct`). Las muertes no se guardan: se derivan
+diffeando los `tag` entre muestras consecutivas. Una partida de 33 min ocupa ~1 MB.
+
+### ⚠️ Licencia de los assets
+
+`./data/bwdata` contiene fragmentos de GRP/DAT/tilesets **propiedad de Blizzard**,
+extraídos de tu propia instalación de SC:R. Están en `.gitignore`, **no** se copian a
+ninguna imagen Docker (se montan read-only en runtime) y **no se pueden
+redistribuir**. Cada máquina que corra el worker necesita generar los suyos con
+`pnpm extract-bwdata` desde una copia con licencia del juego.
+
 ## Estructura
 
 - `app/` — Next.js (dashboard, partidas, detalle con gráficas, chat, login)
 - `lib/ingest.ts` — pipeline: screp → derivaciones (build orders, observaciones heurísticas, evaluación de objetivo) → Postgres
 - `db/schema.sql` — esquema + vistas para Looker Studio (`v_my_games`, `v_matchup_stats`, `v_map_stats`, `v_monthly_trend`)
+- `resim/` — worker de re-simulación OpenBW (capa B) + `verify.js`, el decodificador de referencia del formato `DJR1`
 - `watchers/` — auto-subida por máquina (bash/launchd y PowerShell/Task Scheduler)
 - `Dockerfile` + `docker-compose.yml` — stack completo (Caddy + web con screp + Postgres 16)
 

@@ -205,13 +205,16 @@ export async function ingestReplay(
     await client.query(
       `INSERT INTO games (id, file_name, source, played_at, frames, duration_seconds, map_name,
                           map_width, map_height, game_type, matchup, my_matchup, winner_team,
-                          my_team, my_name, my_race, i_won, is_practice, title, host, rep_path, json_path)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+                          my_team, my_name, my_race, i_won, is_practice, title, host, rep_path, json_path,
+                          resim_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
       [
         id, opts.fileName, opts.source, header.StartTime, header.Frames, durationSeconds,
         header.Map, header.MapWidth, header.MapHeight, header.Type?.Name ?? null,
         matchup, myMatchup, winnerTeam, me?.Team ?? null, me?.Name ?? null,
         me ? me.Race.Name : null, iWon, isPractice, header.Title, header.Host, repPath, jsonPath,
+        // Capa B queue: OpenBW cannot simulate games with a Computer player.
+        isPractice ? "skipped" : "pending",
       ]
     );
 

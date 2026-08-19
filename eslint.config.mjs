@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // The re-simulation worker (capa B) is a standalone CommonJS package with its
+    // own package.json/node_modules and vendored Emscripten glue — not part of the
+    // Next app and not covered by these rules.
+    "resim/**",
   ]),
 ]);
 

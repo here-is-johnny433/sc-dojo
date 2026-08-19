@@ -41,6 +41,25 @@ services:
     ports:
       - "127.0.0.1:3000:3000"   # localhost only — safe on the VPS too (Caddy proxies internally)
 
+  # Capa B: re-simulates every replay with OpenBW and writes the sampled unit +
+  # economy timeline the viewer plays back. `./data/bwdata` holds the Blizzard
+  # game data (generate it with `pnpm extract-bwdata`) — bind-mounted read-only,
+  # never baked into an image. See README "Capa B — re-simulación".
+  resim:
+    build: ./resim
+    restart: unless-stopped
+    user: "100:101"                # same uid/gid as the web container's `dojo`
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://dojo:${POSTGRES_PASSWORD}@db:5432/starcraft_dojo
+      BWDATA_DIR: /bwdata
+      REPLAYS_DIR: /data/replays
+    volumes:
+      - replays:/data/replays
+      - ./data/bwdata:/bwdata:ro
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

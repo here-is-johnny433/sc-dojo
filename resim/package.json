@@ -1,0 +1,15 @@
+{
+  "name": "starcraft-dojo-resim",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenBW re-simulation worker (capa B): .rep -> sampled unit/economy timeline",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "one": "node run-one.js"
+  },
+  "dependencies": {
+    "pg": "^8.23.0",
+    "process-replay": "0.0.11"
+  }
+}

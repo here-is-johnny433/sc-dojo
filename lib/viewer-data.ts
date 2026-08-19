@@ -221,6 +221,23 @@ function battleMarkers(attacks: number[], frames: number): ViewerMarker[] {
     .sort((a, b) => a.f - b.f);
 }
 
+export type ResimStatus = "pending" | "running" | "done" | "failed" | "skipped";
+
+/**
+ * State of the OpenBW re-simulation for a game. The column is added by the
+ * worker's migration, so a database that predates it reports 'pending' instead
+ * of blowing up the viewer.
+ */
+export async function resimStatus(gameId: string): Promise<ResimStatus> {
+  try {
+    const r = await db().query("SELECT resim_status FROM games WHERE id = $1", [gameId]);
+    const s = r.rows[0]?.resim_status;
+    return typeof s === "string" && s ? (s as ResimStatus) : "pending";
+  } catch {
+    return "pending"; // column not there yet
+  }
+}
+
 export async function buildViewerData(gameId: string): Promise<ViewerData | null> {
   const g = await db().query(
     "SELECT id, frames, duration_seconds, map_name, json_path FROM games WHERE id = $1",

@@ -27,6 +27,17 @@ CREATE TABLE IF NOT EXISTS games (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ---------- Capa B: OpenBW re-simulation (resim/ worker) ----------
+-- pending -> running -> done | failed; 'skipped' for practice games (OpenBW has
+-- no ComputerAI, so replays with a Computer player abort).
+ALTER TABLE games ADD COLUMN IF NOT EXISTS resim_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE games ADD COLUMN IF NOT EXISTS resim_error  TEXT;
+CREATE INDEX IF NOT EXISTS idx_games_resim_pending ON games(played_at DESC) WHERE resim_status = 'pending';
+
+-- Backfill: the ALTER leaves every pre-existing row 'pending'; practice games
+-- never need simulating.
+UPDATE games SET resim_status = 'skipped' WHERE is_practice AND resim_status = 'pending';
+
 CREATE TABLE IF NOT EXISTS game_players (
   game_id     TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
   player_id   INTEGER NOT NULL,

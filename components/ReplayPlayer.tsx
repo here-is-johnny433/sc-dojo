@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FPS,
   fmtTime,
@@ -12,7 +12,17 @@ import {
   BUILDING_SECONDS,
 } from "@/lib/bw";
 import { RaceTile } from "@/components/RaceTile";
-import type { ViewerData, ViewerEvent } from "@/lib/viewer-data";
+import type { ViewerData, ViewerEvent, ResimStatus } from "@/lib/viewer-data";
+import {
+  parseResim,
+  deathLowerBound,
+  deathsUpTo,
+  isPseudoType,
+  isEphemeralType,
+  isWorkerType,
+  shortUnitName,
+  type Resim,
+} from "@/lib/resim-format";
 
 interface Comment {
   at_seconds: number;
@@ -43,6 +53,11 @@ const TRAIL_SECONDS = 8; // how long an order dot lingers on the map
 const PING_SECONDS = 2;
 const CHAT_SECONDS = 9;
 const DEFAULT_BUILD_SECONDS = 30;
+const DEATH_FLASH_SECONDS = 1; // how long a kill flashes where the unit died
+
+// Dot radius / structure side (at a 700px-wide board) by the unit's size class.
+const UNIT_RADIUS = [1.5, 2.2, 3.2];
+const BUILDING_SIDE = [7, 9.5, 12.5];
 
 // Very dark tileset tints — the board should stay behind the data.
 const TILESET_BG: Record<string, string> = {
@@ -61,6 +76,9 @@ const VERDICT_COLOR: Record<string, string> = {
   bad: "var(--supply-red)",
   info: "var(--minerals)",
 };
+
+/** Half-unit supply reads as 11.5 for an odd number of zerglings. */
+const fmtSupply = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
 /** First index in a stride-encoded array whose frame is >= target. */
 function lowerBound(arr: number[], stride: number, frame: number): number {
@@ -151,8 +169,27 @@ function statsAt(data: ViewerData, frame: number): Map<number, PlayerStats> {
   return out;
 }
 
-export function ReplayPlayer({ gameId }: { gameId: string }) {
+/** Live numbers read straight out of the re-simulation, per screp PlayerID. */
+interface RealStats {
+  minerals: number;
+  gas: number;
+  supplyUsed: number; // already halved to in-game units
+  supplyMax: number;
+  workers: number;
+  army: number;
+  losses: number;
+}
+
+export function ReplayPlayer({
+  gameId,
+  resimStatus = "pending",
+}: {
+  gameId: string;
+  /** Worker state read server-side; drives the "still cooking" note only. */
+  resimStatus?: ResimStatus;
+}) {
   const [data, setData] = useState<ViewerData | null>(null);
+  const [resim, setResim] = useState<Resim | null>(null);
   const [comments, setComments] = useState<Comment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -170,6 +207,9 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
   const frameRef = useRef(0);
   const dirtyRef = useRef(true);
   const drawRef = useRef<() => void>(undefined);
+  // tag → unit index of the *next* sample, rebuilt only when that sample
+  // changes (~twice a game second), never per drawn frame.
+  const interpRef = useRef<{ sample: number; index: Map<number, number> } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -201,6 +241,29 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
     };
   }, [gameId]);
 
+  // Layer B: the OpenBW re-simulation. Optional by design — when the worker
+  // hasn't produced it (or failed), everything below falls back to the
+  // command-derived layer A view.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch(`/api/games/${gameId}/resim-data`);
+        if (!res.ok) return;
+        const parsed = parseResim(await res.arrayBuffer());
+        if (alive && parsed.sampleCount > 0) {
+          interpRef.current = null;
+          setResim(parsed);
+        }
+      } catch {
+        // corrupt or half-written dump: stay on layer A
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [gameId]);
+
   const seek = useCallback(
     (frame: number) => {
       if (!data || !Number.isFinite(frame)) return;
@@ -214,6 +277,14 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
   // Relative jumps read the live frame, not the throttled UI mirror, so two
   // quick clicks on +10s move 20 seconds.
   const nudge = useCallback((deltaSeconds: number) => seek(frameRef.current + deltaSeconds * FPS), [seek]);
+
+  // Colors by re-simulation owner index (the header carries screp PlayerIDs).
+  const ownerColors = useMemo(() => {
+    if (!data || !resim) return null;
+    return resim.header.players.map(
+      (rp) => data.players.find((p) => p.id === rp.id)?.color ?? "#9aa8bb"
+    );
+  }, [data, resim]);
 
   // --- Canvas: the whole render is a pure function of the current frame ---
   const draw = useCallback(() => {
@@ -300,39 +371,153 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
     }
     ctx.globalAlpha = 1;
 
-    // Structures: fade in over their build time, expansions get a ring.
-    for (const e of data.events) {
-      if (e.f > frame) break;
-      if (e.x == null || e.y == null) continue;
-      const built = (BUILDING_SECONDS[e.i] ?? DEFAULT_BUILD_SECONDS) * FPS;
-      const progress = Math.min(1, (frame - e.f) / built);
-      const color = colorOf.get(e.p) ?? "#9aa8bb";
-      const isDepot = RESOURCE_DEPOTS.has(e.i);
-      const size = (isDepot ? 13 : 9) * (W / 700);
-      const x = e.x * sx;
-      const y = e.y * sy;
-      ctx.globalAlpha = 0.35 + 0.65 * progress;
-      ctx.fillStyle = color;
-      ctx.fillRect(x - size / 2, y - size / 2, size, size);
-      ctx.globalAlpha = 1;
-      if (progress < 1) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x - size / 2 - 2, y - size / 2 - 2, size + 4, size + 4);
-      } else if (isDepot) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
+    const useResim = resim != null && ownerColors != null;
+
+    // Structures (layer A): fade in over their build time, expansions get a
+    // ring. Skipped entirely once the re-simulation gives us real buildings.
+    if (!useResim) {
+      for (const e of data.events) {
+        if (e.f > frame) break;
+        if (e.x == null || e.y == null) continue;
+        const built = (BUILDING_SECONDS[e.i] ?? DEFAULT_BUILD_SECONDS) * FPS;
+        const progress = Math.min(1, (frame - e.f) / built);
+        const color = colorOf.get(e.p) ?? "#9aa8bb";
+        const isDepot = RESOURCE_DEPOTS.has(e.i);
+        const size = (isDepot ? 13 : 9) * (W / 700);
+        const x = e.x * sx;
+        const y = e.y * sy;
+        ctx.globalAlpha = 0.35 + 0.65 * progress;
+        ctx.fillStyle = color;
+        ctx.fillRect(x - size / 2, y - size / 2, size, size);
+        ctx.globalAlpha = 1;
+        if (progress < 1) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x - size / 2 - 2, y - size / 2 - 2, size + 4, size + 4);
+        } else if (isDepot) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(x, y, size, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        if (size >= 11) {
+          ctx.fillStyle = "rgba(10,14,20,0.9)";
+          ctx.font = `600 ${Math.round(size * 0.72)}px var(--font-plex-mono), monospace`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(e.i[0], x, y + 0.5);
+        }
+      }
+    }
+
+    // --- Layer B: the real board, straight from the re-simulation ---
+    if (useResim) {
+      const k = W / 700;
+      const s = resim.sampleAtFrame(frame);
+      const next = s + 1 < resim.sampleCount ? s + 1 : -1;
+
+      // Interpolate towards the next sample so playback glides instead of
+      // stepping every ~0.5s. The tag→index table is cached per sample pair.
+      let mix = 0;
+      let ahead: Map<number, number> | null = null;
+      if (next >= 0) {
+        const f0 = resim.frameAt(s);
+        const f1 = resim.frameAt(next);
+        if (f1 > f0) mix = Math.min(1, Math.max(0, (frame - f0) / (f1 - f0)));
+        if (mix > 0) {
+          if (interpRef.current?.sample !== next) {
+            const index = new Map<number, number>();
+            const m = resim.unitCount(next);
+            for (let j = 0; j < m; j++) index.set(resim.unitTag(next, j), j);
+            interpRef.current = { sample: next, index };
+          }
+          ahead = interpRef.current.index;
+        }
+      }
+
+      const n = resim.unitCount(s);
+      let last = "";
+      // Buildings first: mobile units belong on top of them.
+      for (let i = 0; i < n; i++) {
+        const info = resim.typeInfo(resim.unitType(s, i));
+        if (!info.building) continue;
+        if (isPseudoType(info)) continue;
+        const color = ownerColors[resim.unitOwner(s, i)] ?? "#9aa8bb";
+        if (color !== last) {
+          ctx.fillStyle = color;
+          last = color;
+        }
+        const side = (BUILDING_SIDE[info.size] ?? BUILDING_SIDE[1]) * k;
+        const x = resim.unitX(s, i) * sx;
+        const y = resim.unitY(s, i) * sy;
+        const hp = resim.unitHp(s, i);
+        // Slightly recessed so the armies read on top of the base.
+        ctx.globalAlpha = hp < 100 ? 0.45 + 0.4 * (hp / 100) : 0.85;
+        ctx.fillRect(x - side / 2, y - side / 2, side, side);
+        ctx.globalAlpha = 1;
+        if (hp < 100) {
+          ctx.strokeStyle = "rgba(226,85,85,0.7)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x - side / 2 - 1, y - side / 2 - 1, side + 2, side + 2);
+          last = "";
+        }
+      }
+      for (let i = 0; i < n; i++) {
+        const info = resim.typeInfo(resim.unitType(s, i));
+        if (info.building || isPseudoType(info)) continue;
+        let px = resim.unitX(s, i);
+        let py = resim.unitY(s, i);
+        if (ahead) {
+          const j = ahead.get(resim.unitTag(s, i));
+          if (j !== undefined && resim.unitType(next, j) === resim.unitType(s, i)) {
+            px += (resim.unitX(next, j) - px) * mix;
+            py += (resim.unitY(next, j) - py) * mix;
+          }
+        }
+        const color = ownerColors[resim.unitOwner(s, i)] ?? "#9aa8bb";
+        if (color !== last) {
+          ctx.fillStyle = color;
+          last = color;
+        }
+        const r = (UNIT_RADIUS[info.size] ?? UNIT_RADIUS[0]) * k;
+        const x = px * sx;
+        const y = py * sy;
         ctx.beginPath();
-        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+        const hp = resim.unitHp(s, i);
+        if (hp < 100) {
+          ctx.strokeStyle = "rgba(226,85,85,0.75)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          // Arc length shows how much health is gone.
+          ctx.arc(x, y, r + 1.2 * k, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - hp / 100));
+          ctx.stroke();
+        }
+      }
+
+      // Kills: a short flash where the tag vanished.
+      const deaths = resim.deathIndex();
+      const flash = DEATH_FLASH_SECONDS * FPS;
+      const dFrom = deathLowerBound(deaths, frame - flash);
+      const dTo = deathLowerBound(deaths, frame + 1);
+      ctx.strokeStyle = "#e25555";
+      ctx.lineWidth = 1.4;
+      for (let i = dFrom; i < dTo; i++) {
+        const age = (frame - deaths.frame[i]) / flash;
+        ctx.globalAlpha = Math.max(0, 1 - age);
+        const x = deaths.x[i] * sx;
+        const y = deaths.y[i] * sy;
+        const r = (2.5 + 5 * age) * k;
+        ctx.beginPath();
+        ctx.moveTo(x - r, y - r);
+        ctx.lineTo(x + r, y + r);
+        ctx.moveTo(x + r, y - r);
+        ctx.lineTo(x - r, y + r);
         ctx.stroke();
       }
-      if (size >= 11) {
-        ctx.fillStyle = "rgba(10,14,20,0.9)";
-        ctx.font = `600 ${Math.round(size * 0.72)}px var(--font-plex-mono), monospace`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(e.i[0], x, y + 0.5);
-      }
+      ctx.globalAlpha = 1;
     }
 
     // Minimap pings as expanding rings.
@@ -354,7 +539,7 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
-  }, [data]);
+  }, [data, resim, ownerColors]);
 
   useEffect(() => {
     drawRef.current = draw;
@@ -442,6 +627,53 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
   }, [nudge]);
 
   const stats = useMemo(() => (data ? statsAt(data, uiFrame) : null), [data, uiFrame]);
+
+  // Layer B sidebar numbers: one pass over the current sample plus the cached
+  // death index — no per-unit objects, so scrubbing stays instant.
+  const real = useMemo(() => {
+    if (!resim) return null;
+    const s = resim.sampleAtFrame(uiFrame);
+    if (s < 0) return null;
+    const deaths = resim.deathIndex();
+    const byId = new Map<number, RealStats>();
+    const idxOf = new Map<number, number>();
+    resim.header.players.forEach((rp, i) => {
+      idxOf.set(rp.id, i);
+      byId.set(rp.id, {
+        minerals: resim.minerals(s, i),
+        gas: resim.gas(s, i),
+        supplyUsed: resim.supplyUsed(s, i) / 2,
+        supplyMax: resim.supplyMax(s, i) / 2,
+        workers: 0,
+        army: 0,
+        losses: deathsUpTo(deaths, i, uiFrame),
+      });
+    });
+
+    const focusIdx = focusId != null ? (idxOf.get(focusId) ?? -1) : -1;
+    const mix = new Map<string, number>();
+    const n = resim.unitCount(s);
+    for (let i = 0; i < n; i++) {
+      const info = resim.typeInfo(resim.unitType(s, i));
+      if (info.building || isPseudoType(info) || isEphemeralType(info)) continue;
+      const owner = resim.unitOwner(s, i);
+      const st = byId.get(resim.header.players[owner]?.id ?? -1);
+      const worker = isWorkerType(info);
+      if (st) {
+        if (worker) st.workers++;
+        else st.army++;
+      }
+      if (owner === focusIdx && !worker) {
+        const unit = shortUnitName(info.name);
+        mix.set(unit, (mix.get(unit) ?? 0) + 1);
+      }
+    }
+    return {
+      byId,
+      aliveMix: [...mix].sort((a, b) => b[1] - a[1]).slice(0, 5),
+    };
+  }, [resim, uiFrame, focusId]);
+
   const seconds = Math.floor(uiFrame / FPS);
 
   // Auto-scroll the live build order as it writes itself.
@@ -480,6 +712,7 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
   const aspect = data.map.widthPx / data.map.heightPx;
   const focus = data.players.find((p) => p.id === focusId) ?? data.players[0];
   const focusStats = stats.get(focus.id)!;
+  const focusReal = real?.byId.get(focus.id) ?? null;
   const visibleChat = data.chat.filter(
     (c) => c.f <= uiFrame && uiFrame - c.f < CHAT_SECONDS * FPS
   );
@@ -533,6 +766,7 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
           playing={playing}
           speed={speed}
           showTech={showTech}
+          resimOn={real != null}
           markers={markers}
           onToggle={() => setPlaying((p) => !p)}
           onSpeed={setSpeed}
@@ -555,6 +789,11 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
           <span className="font-data text-[11px] text-[var(--ink-faint)]">
             espacio = play/pausa · ← → = ±10s
           </span>
+          {!real && (resimStatus === "pending" || resimStatus === "running") && (
+            <span className="font-data text-[11px] text-[var(--ink-faint)]">
+              · Re-simulación en curso — las unidades aparecerán al terminar
+            </span>
+          )}
         </div>
       </div>
 
@@ -628,9 +867,10 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
             <tbody>
               {data.players.map((p) => {
                 const s = stats.get(p.id)!;
+                const r = real?.byId.get(p.id) ?? null;
                 return (
+                  <Fragment key={p.id}>
                   <tr
-                    key={p.id}
                     onClick={() => setFocusId(p.id)}
                     className="cursor-pointer border-t border-[var(--grid-line-soft)]"
                     style={p.id === focus.id ? { background: "var(--hud)" } : undefined}
@@ -657,24 +897,52 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
                     <td
                       className="font-data text-right tabular-nums"
                       style={{
-                        color: s.workers < s.saturation * 0.8 ? "var(--energy)" : "var(--ink-dim)",
+                        color:
+                          (r?.workers ?? s.workers) < s.saturation * 0.8
+                            ? "var(--energy)"
+                            : "var(--ink-dim)",
                       }}
                     >
-                      {s.workers}
+                      {r ? r.workers : s.workers}
                     </td>
                     <td className="font-data text-right tabular-nums text-[var(--ink-dim)]">
-                      {s.supply}
+                      {r ? `${fmtSupply(r.supplyUsed)}/${fmtSupply(r.supplyMax)}` : s.supply}
                     </td>
                   </tr>
+                  {r && (
+                    <tr
+                      onClick={() => setFocusId(p.id)}
+                      className="cursor-pointer"
+                      style={p.id === focus.id ? { background: "var(--hud)" } : undefined}
+                    >
+                      <td colSpan={4} className="pb-1">
+                        <span className="font-data flex gap-2 pl-[15px] text-[10px] tabular-nums text-[var(--ink-faint)]">
+                          <span style={{ color: "var(--minerals)" }}>{r.minerals}</span>
+                          <span style={{ color: "var(--vespene)" }}>{r.gas}</span>
+                          <span className="ml-auto" title="unidades perdidas hasta este momento">
+                            <span style={{ color: "var(--supply-red)" }}>✝</span> {r.losses}
+                          </span>
+                        </span>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>
           </table>
-          <p className="mt-2 text-[10px] leading-snug text-[var(--ink-faint)]">
-            Wk = workers producidos vs. saturación ({focusStats.bases} base
-            {focusStats.bases !== 1 ? "s" : ""} ≈ {focusStats.saturation}) · Sup = supply de
-            ejército producido. Los replays guardan órdenes, no bajas.
-          </p>
+          {real ? (
+            <p className="mt-2 text-[10px] leading-snug text-[var(--ink-faint)]">
+              Datos reales de la re-simulación: Wk = workers vivos · Sup = supply usado/máximo ·
+              minerales / gas en mano · ✝ = unidades perdidas. APM sale de los comandos.
+            </p>
+          ) : (
+            <p className="mt-2 text-[10px] leading-snug text-[var(--ink-faint)]">
+              Estimado desde comandos: Wk = workers producidos vs. saturación ({focusStats.bases}{" "}
+              base{focusStats.bases !== 1 ? "s" : ""} ≈ {focusStats.saturation}) · Sup = supply de
+              ejército producido. Los replays guardan órdenes, no bajas.
+            </p>
+          )}
         </section>
 
         {/* Focused player */}
@@ -686,16 +954,19 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
 
           <div className="mb-3">
             <div className="mb-1 flex justify-between text-[10px] text-[var(--ink-faint)]">
-              <span>workers {focusStats.workers}</span>
+              <span>
+                workers {focusReal ? focusReal.workers : focusStats.workers}
+                {focusReal && <span className="text-[var(--ink-ghost)]"> vivos</span>}
+              </span>
               <span>saturación ~{focusStats.saturation}</span>
             </div>
             <div className="h-[5px] w-full overflow-hidden rounded-full bg-[var(--hud)]">
               <div
                 className="h-full rounded-full"
                 style={{
-                  width: `${Math.min(100, (focusStats.workers / focusStats.saturation) * 100)}%`,
+                  width: `${Math.min(100, ((focusReal?.workers ?? focusStats.workers) / focusStats.saturation) * 100)}%`,
                   background:
-                    focusStats.workers < focusStats.saturation * 0.8
+                    (focusReal?.workers ?? focusStats.workers) < focusStats.saturation * 0.8
                       ? "var(--energy)"
                       : "var(--psi)",
                 }}
@@ -703,12 +974,40 @@ export function ReplayPlayer({ gameId }: { gameId: string }) {
             </div>
           </div>
 
+          {real && (
+            <div className="mb-3">
+              <p className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-[var(--ink-faint)]">
+                <span>Ejército vivo</span>
+                <span className="font-data normal-case tracking-normal">
+                  {focusReal?.army ?? 0} unidades · ✝ {focusReal?.losses ?? 0}
+                </span>
+              </p>
+              {real.aliveMix.length === 0 ? (
+                <p className="font-data text-[11px] text-[var(--ink-ghost)]">sin ejército</p>
+              ) : (
+                <div className="space-y-0.5">
+                  {real.aliveMix.map(([unit, n]) => (
+                    <p key={unit} className="font-data flex justify-between text-[11px]">
+                      <span className="truncate text-[var(--ink)]">{unit}</span>
+                      <span className="tabular-nums">{n}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {focusStats.mix.length > 0 && (
             <div className="mb-3 space-y-0.5">
+              {real && (
+                <p className="text-[10px] uppercase tracking-[0.12em] text-[var(--ink-faint)]">
+                  Producido (comandos)
+                </p>
+              )}
               {focusStats.mix.map(([unit, n]) => (
                 <p key={unit} className="font-data flex justify-between text-[11px]">
                   <span className="truncate text-[var(--ink-dim)]">{unit}</span>
-                  <span className="tabular-nums">{n}</span>
+                  <span className="tabular-nums text-[var(--ink-dim)]">{n}</span>
                 </p>
               ))}
             </div>
@@ -762,6 +1061,7 @@ function Controls({
   playing,
   speed,
   showTech,
+  resimOn,
   markers,
   onToggle,
   onSpeed,
@@ -774,6 +1074,7 @@ function Controls({
   playing: boolean;
   speed: number;
   showTech: boolean;
+  resimOn: boolean;
   markers: Mark[];
   onToggle: () => void;
   onSpeed: (s: number) => void;
@@ -857,6 +1158,15 @@ function Controls({
           {fmtTime(Math.floor(uiFrame / FPS))}
           <span className="text-[var(--ink-faint)]"> / {fmtTime(data.durationSeconds)}</span>
         </span>
+        {resimOn && (
+          <span
+            className="font-data rounded-md px-1.5 py-0.5 text-[10px]"
+            style={{ background: "var(--psi-dim)", color: "var(--psi)" }}
+            title="Unidades, economía y bajas vienen de la re-simulación OpenBW, no de los comandos"
+          >
+            Simulación completa
+          </span>
+        )}
         <span className="ml-auto flex items-center gap-1">
           {SPEEDS.map((s) => (
             <button

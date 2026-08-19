@@ -1,7 +1,13 @@
 import fs from "fs/promises";
+import zlib from "zlib";
+import { promisify } from "util";
 import type Anthropic from "@anthropic-ai/sdk";
 import { db, dbRO } from "./db";
 import { fmtTime } from "./bw";
+import { parseResim, resimFilePath, shortUnitName, type Resim } from "./resim-format";
+import { resimStatus } from "./viewer-data";
+
+const gunzip = promisify(zlib.gunzip);
 
 export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
@@ -18,6 +24,16 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
     name: "get_replay_details",
     description:
       "Devuelve el detalle profundo de una partida: jugadores, chat completo, build order completo (incluye workers) por jugador con timestamps, y quién abandonó. Úsalo para analizar una partida específica a fondo.",
+    input_schema: {
+      type: "object" as const,
+      properties: { game_id: { type: "string", description: "id de la partida (games.id)" } },
+      required: ["game_id"],
+    },
+  },
+  {
+    name: "get_battle_report",
+    description:
+      "Devuelve las batallas REALES de una partida a partir de la re-simulación OpenBW: cada cluster de bajas (ventana de 15s, radio de 512px, mínimo 4 muertes) con inicio/fin en mm:ss, posición en el mapa, y qué unidades perdió cada jugador, más los totales de bajas por jugador. Es la única fuente de bajas reales: los comandos del replay no las contienen. Úsalo para analizar peleas, intercambios y errores de posicionamiento. Si la re-simulación aún no está lista devuelve su estado.",
     input_schema: {
       type: "object" as const,
       properties: { game_id: { type: "string", description: "id de la partida (games.id)" } },
@@ -191,12 +207,141 @@ export async function replayDetails(gameId: string): Promise<string> {
   });
 }
 
+/** Reads and inflates the OpenBW dump for a game; null when it isn't there. */
+export async function loadResim(gameId: string): Promise<Resim | null> {
+  try {
+    const raw = await gunzip(await fs.readFile(resimFilePath(gameId)));
+    const view = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
+    return parseResim(view);
+  } catch {
+    return null;
+  }
+}
+
+const BATTLE_WINDOW_SECONDS = 15;
+const BATTLE_RADIUS_PX = 512;
+const BATTLE_MIN_DEATHS = 4;
+
+interface Cluster {
+  fromFrame: number;
+  toFrame: number;
+  sumX: number;
+  sumY: number;
+  n: number;
+  /** ownerIdx → typeId → count */
+  losses: Map<number, Map<number, number>>;
+}
+
+/**
+ * Battles = clusters of deaths in space and time. Deaths arrive frame-sorted,
+ * so a cluster whose last death is older than the window can never grow again.
+ */
+export async function battleReport(gameId: string): Promise<string> {
+  if (!/^[a-f0-9]{16}$/.test(gameId)) return "ERROR: game_id inválido";
+  const resim = await loadResim(gameId);
+  if (!resim) {
+    const status = await resimStatus(gameId);
+    return JSON.stringify({
+      error: "sin re-simulación disponible para esta partida",
+      resim_status: status,
+      hint:
+        status === "done"
+          ? "el archivo no está en disco"
+          : "la re-simulación aún no terminó; usa get_replay_details mientras tanto",
+    });
+  }
+
+  const fps = resim.header.fps;
+  const window = BATTLE_WINDOW_SECONDS * fps;
+  const d = resim.deathIndex();
+  const open: Cluster[] = [];
+  const done: Cluster[] = [];
+
+  for (let i = 0; i < d.count; i++) {
+    const f = d.frame[i];
+    const x = d.x[i];
+    const y = d.y[i];
+    // A battle spans at most one window: closing on the *start* keeps a busy
+    // base from growing into one three-minute "fight".
+    for (let c = open.length - 1; c >= 0; c--) {
+      if (f - open[c].fromFrame > window) done.push(...open.splice(c, 1));
+    }
+    let best: Cluster | null = null;
+    let bestDist = Infinity;
+    for (const c of open) {
+      const dx = x - c.sumX / c.n;
+      const dy = y - c.sumY / c.n;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= BATTLE_RADIUS_PX && dist < bestDist) {
+        best = c;
+        bestDist = dist;
+      }
+    }
+    if (!best) {
+      best = { fromFrame: f, toFrame: f, sumX: 0, sumY: 0, n: 0, losses: new Map() };
+      open.push(best);
+    }
+    best.toFrame = f;
+    best.sumX += x;
+    best.sumY += y;
+    best.n++;
+    const perPlayer = best.losses.get(d.owner[i]) ?? new Map<number, number>();
+    perPlayer.set(d.type[i], (perPlayer.get(d.type[i]) ?? 0) + 1);
+    best.losses.set(d.owner[i], perPlayer);
+  }
+  done.push(...open);
+
+  const battles = done
+    .filter((c) => c.n >= BATTLE_MIN_DEATHS)
+    .sort((a, b) => a.fromFrame - b.fromFrame)
+    .map((c) => {
+      const losses: Record<string, Record<string, number>> = {};
+      for (const [owner, byType] of c.losses) {
+        const byName: Record<string, number> = {};
+        for (const [typeId, n] of byType) {
+          const unit = shortUnitName(resim.typeName(typeId));
+          byName[unit] = (byName[unit] ?? 0) + n;
+        }
+        losses[resim.playerName(owner)] = byName;
+      }
+      return {
+        from: fmtTime(Math.round(c.fromFrame / fps)),
+        to: fmtTime(Math.round(c.toFrame / fps)),
+        location: { x: Math.round(c.sumX / c.n), y: Math.round(c.sumY / c.n) },
+        total_bajas: c.n,
+        losses,
+      };
+    });
+
+  // Totals over the whole game, not just the clustered fights.
+  const totals: Record<string, { total: number; por_unidad: Record<string, number> }> = {};
+  for (const p of resim.header.players) totals[p.name] = { total: 0, por_unidad: {} };
+  for (let i = 0; i < d.count; i++) {
+    const t = totals[resim.playerName(d.owner[i])];
+    if (!t) continue;
+    t.total++;
+    const unit = shortUnitName(resim.typeName(d.type[i]));
+    t.por_unidad[unit] = (t.por_unidad[unit] ?? 0) + 1;
+  }
+
+  return JSON.stringify({
+    game_id: gameId,
+    fuente: "re-simulación OpenBW (bajas reales)",
+    criterio: `ventana ${BATTLE_WINDOW_SECONDS}s · radio ${BATTLE_RADIUS_PX}px · mínimo ${BATTLE_MIN_DEATHS} bajas`,
+    duracion: fmtTime(Math.round(resim.header.frames / fps)),
+    battles,
+    totales_por_jugador: totals,
+  });
+}
+
 export async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
   switch (name) {
     case "query_db":
       return runQuery(String(input.sql ?? ""));
     case "get_replay_details":
       return replayDetails(String(input.game_id ?? ""));
+    case "get_battle_report":
+      return battleReport(String(input.game_id ?? ""));
     case "list_notes": {
       const r = await db().query(
         "SELECT id, area, title, content, updated_at FROM agent_notes ORDER BY area, updated_at DESC"

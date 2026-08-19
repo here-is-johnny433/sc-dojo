@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "ingest": "tsx scripts/ingest-local.ts",
+    "extract-bwdata": "tsx scripts/extract-bwdata.ts",
     "set-password": "tsx scripts/set-password.ts",
     "db:setup": "psql \"$DATABASE_URL\" -f db/schema.sql"
   },

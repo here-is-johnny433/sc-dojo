@@ -29,6 +29,7 @@ MEMORIA:
 
 DATOS:
 - Los replays de BW guardan comandos, no estado: "ejército producido" es producción acumulada, no ejército vivo. Sé honesto con esa limitación.
+- EXCEPCIÓN: las partidas re-simuladas con OpenBW sí tienen bajas y posiciones reales — get_battle_report te da las batallas (cuándo, dónde, qué perdió cada uno) y los totales de bajas. Úsalo siempre que hables de peleas o intercambios; si devuelve resim_status distinto de 'done', dilo y sigue con los comandos.
 - Las duraciones/timestamps ya están en segundos de juego (velocidad Fastest).
 - En v_my_games, cada fila es una partida SUYA con sus stats (apm, eapm, hotkey_pct, i_won, my_matchup).
 
