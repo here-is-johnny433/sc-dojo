@@ -1,10 +1,18 @@
 // The SC monogram (official vector, cropped to its content box). One source
 // for every place the mark appears — header, login, etc.
 
-export function LogoSC({ height = 15, color = "var(--ink)" }: { height?: number; color?: string }) {
+export function LogoSC({
+  height = 15,
+  color = "var(--ink)",
+  className,
+}: {
+  height?: number;
+  color?: string;
+  className?: string;
+}) {
   const width = Math.round(height * 2);
   return (
-    <svg width={width} height={height} viewBox="1 13 45.5 22.5" aria-hidden fill={color}>
+    <svg width={width} height={height} viewBox="1 13 45.5 22.5" aria-hidden fill={color} className={className}>
       <path
         fillRule="evenodd"
         clipRule="evenodd"
