@@ -32,13 +32,10 @@ export default function LoginPage() {
   return (
     <main className="flex min-h-screen items-center justify-center p-6">
       <form onSubmit={submit} className="card w-full max-w-sm p-8">
-        <div className="mb-2">
-          <LogoSC height={26} />
-        </div>
-        <p className="font-data text-[11px] uppercase tracking-[0.25em] text-[var(--psi)]">
-          Starcraft
-        </p>
-        <h1 className="mb-1 text-2xl font-semibold tracking-tight">Dojo</h1>
+        <h1 className="mb-1 flex items-center gap-3">
+          <LogoSC height={24} />
+          <span className="text-2xl font-bold tracking-tight">DOJO</span>
+        </h1>
         <p className="mb-6 text-[13px] text-[var(--ink-dim)]">
           Tu sala de entrenamiento de Brood War.
         </p>
