@@ -6,7 +6,6 @@ import { resimStatus } from "@/lib/viewer-data";
 import { fmtTime } from "@/lib/bw";
 import { MatchupTiles } from "@/components/RaceTile";
 import { ReplayPlayer } from "@/components/ReplayPlayer";
-import { GameChartsSection } from "@/components/GameChartsSection";
 
 export const dynamic = "force-dynamic";
 
@@ -69,15 +68,6 @@ export default async function ReplayPage({ params }: { params: Promise<{ id: str
       </div>
 
       <ReplayPlayer gameId={game.id} resimStatus={resim} />
-
-      {/* Todas las gráficas de la partida viven aquí, junto al replay. */}
-      <GameChartsSection
-        gameId={game.id}
-        viewerUserId={user.id}
-        durationSeconds={game.duration_seconds ?? 0}
-        players={players}
-        events={detail.events}
-      />
     </div>
   );
 }

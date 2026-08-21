@@ -69,6 +69,8 @@ export interface ViewerData {
   markers: ViewerMarker[];
   /** playerId → sorted frames of every command, for rolling APM */
   actions: Record<number, number[]>;
+  /** playerId → sorted frames of hotkey commands, for the rolling hotkey % */
+  hotkeys: Record<number, number[]>;
 }
 
 interface RawCmd {
@@ -283,13 +285,18 @@ export async function buildViewerData(
   const orders: number[] = [];
   const pings: number[] = [];
   const actions: Record<number, number[]> = {};
+  const hotkeys: Record<number, number[]> = {};
   const attackFrames: number[] = [];
   const firstAttack = new Map<number, number>();
-  for (const p of players) actions[p.id] = [];
+  for (const p of players) {
+    actions[p.id] = [];
+    hotkeys[p.id] = [];
+  }
 
   for (const c of raw.Commands?.Cmds ?? []) {
     if (!known.has(c.PlayerID)) continue;
     actions[c.PlayerID].push(c.Frame);
+    if (c.Type.Name === "Hotkey") hotkeys[c.PlayerID].push(c.Frame);
 
     switch (c.Type.Name) {
       case "Build":
@@ -393,5 +400,6 @@ export async function buildViewerData(
     leaves,
     markers,
     actions,
+    hotkeys,
   };
 }

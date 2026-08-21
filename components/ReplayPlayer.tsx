@@ -22,6 +22,7 @@ import {
   isEphemeralType,
   isWorkerType,
   shortUnitName,
+  unitClass,
   type Resim,
 } from "@/lib/resim-format";
 
@@ -60,8 +61,12 @@ const DEFAULT_BUILD_SECONDS = 30;
 const DEATH_FLASH_SECONDS = 1; // how long a kill flashes where the unit died
 
 // Dot radius / structure side (at a 700px-wide board) by the unit's size class.
-const UNIT_RADIUS = [1.5, 2.2, 3.2];
-const BUILDING_SIDE = [7, 9.5, 12.5];
+const UNIT_RADIUS = [2.1, 3, 4.2];
+const BUILDING_SIDE = [8, 11, 14];
+
+// Combat halos: recent deaths cluster into a pulsing ring on the zone.
+const COMBAT_WINDOW_SECONDS = 10;
+const COMBAT_CLUSTER_PX = 160; // map pixels — deaths closer than this share a halo
 
 // Painted terrain is beautiful and also loud: this veil pushes it back so the
 // units keep owning the board. Matches --void at ~50%.
@@ -89,7 +94,7 @@ const VERDICT_COLOR: Record<string, string> = {
 const BUCKETS = 140;
 const BAR_GROUPS = 28;
 
-type MetricKey = "min" | "gas" | "sup" | "wk" | "army" | "bajas" | "apm";
+type MetricKey = "min" | "gas" | "sup" | "wk" | "army" | "bajas" | "apm" | "hk";
 type ViewMode = "teams" | "all" | "focus";
 type ChartType = "line" | "area" | "bars";
 
@@ -101,6 +106,7 @@ const METRICS: { key: MetricKey; label: string; unit: string; resim: boolean }[]
   { key: "army", label: "Ejército", unit: "unidades vivas", resim: true },
   { key: "bajas", label: "Bajas", unit: "acumuladas", resim: true },
   { key: "apm", label: "APM", unit: "ventana 60s", resim: false },
+  { key: "hk", label: "Hotkeys %", unit: "% de acciones · ventana 60s", resim: false },
 ];
 
 /** Half-unit supply reads as 11.5 for an odd number of zerglings. */
@@ -203,6 +209,8 @@ interface HoverRow {
   /** units 0 · buildings 1 · terrain resources 2 — the order they're listed in. */
   rank: number;
   count: number;
+  /** Sum of unit HP% across the group — averaged into `detail` at the end. */
+  hpSum?: number;
 }
 
 interface HoverInfo {
@@ -356,6 +364,18 @@ export function ReplayPlayer({
   }, [data, resim]);
 
   // --- Canvas: the whole render is a pure function of the current frame ---
+  // Shape class per typeId, resolved once per dump — regexing names every
+  // frame for hundreds of units would burn the draw budget.
+  const typeClasses = useMemo(() => {
+    const m = new Map<number, 0 | 1 | 2>();
+    if (resim) {
+      for (const [id, info] of Object.entries(resim.header.types)) {
+        m.set(Number(id), unitClass(info));
+      }
+    }
+    return m;
+  }, [resim]);
+
   const draw = useCallback(() => {
     const cv = canvasRef.current;
     if (!cv || !data) return;
@@ -394,17 +414,38 @@ export function ReplayPlayer({
       }
     }
 
-    // Resources.
-    const dot = (arr: number[], color: string, r: number) => {
-      ctx.fillStyle = color;
-      for (let i = 0; i < arr.length; i += 2) {
-        ctx.beginPath();
-        ctx.arc(arr[i] * sx, arr[i + 1] * sy, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
+    // Resources: minerals are blue diamonds (crystals), geysers green hexagons.
+    const diamond = (x: number, y: number, r: number) => {
+      ctx.beginPath();
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x + r, y);
+      ctx.lineTo(x, y + r);
+      ctx.lineTo(x - r, y);
+      ctx.closePath();
+      ctx.fill();
     };
-    dot(data.map.minerals, "rgba(77,163,255,0.75)", Math.max(1.2, 2 * sx * 8));
-    dot(data.map.geysers, "rgba(88,194,110,0.8)", Math.max(1.5, 2.6 * sx * 8));
+    const hexagon = (x: number, y: number, r: number) => {
+      ctx.beginPath();
+      for (let a = 0; a < 6; a++) {
+        const ang = (Math.PI / 3) * a - Math.PI / 6;
+        const px = x + r * Math.cos(ang);
+        const py = y + r * Math.sin(ang);
+        if (a === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+    };
+    ctx.fillStyle = "rgba(77,163,255,0.8)";
+    const mr = Math.max(1.8, 2.8 * sx * 8);
+    for (let i = 0; i < data.map.minerals.length; i += 2) {
+      diamond(data.map.minerals[i] * sx, data.map.minerals[i + 1] * sy, mr);
+    }
+    ctx.fillStyle = "rgba(88,194,110,0.85)";
+    const gr = Math.max(2.2, 3.4 * sx * 8);
+    for (let i = 0; i < data.map.geysers.length; i += 2) {
+      hexagon(data.map.geysers[i] * sx, data.map.geysers[i + 1] * sy, gr);
+    }
 
     // Start locations: diamonds, tinted when a player spawned there.
     for (let i = 0; i < data.map.starts.length; i += 2) {
@@ -559,9 +600,25 @@ export function ReplayPlayer({
         const r = (UNIT_RADIUS[info.size] ?? UNIT_RADIUS[0]) * k;
         const x = px * sx;
         const y = py * sy;
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fill();
+        const cls = typeClasses.get(resim.unitType(s, i)) ?? 0;
+        if (cls === 1) {
+          // mech terrestre: cuadrado
+          ctx.fillRect(x - r, y - r, r * 2, r * 2);
+        } else if (cls === 2) {
+          // aéreo: triángulo
+          const t = r * 1.3;
+          ctx.beginPath();
+          ctx.moveTo(x, y - t);
+          ctx.lineTo(x + t * 0.9, y + t * 0.72);
+          ctx.lineTo(x - t * 0.9, y + t * 0.72);
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          // bio: círculo
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
         const hp = resim.unitHp(s, i);
         if (hp < 100) {
           ctx.strokeStyle = "rgba(226,85,85,0.75)";
@@ -594,6 +651,59 @@ export function ReplayPlayer({
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
+
+      // Combat halos: deaths of the last few seconds cluster into a pulsing
+      // ring with the casualty count — the "aquí está la pelea" pin.
+      const win = COMBAT_WINDOW_SECONDS * FPS;
+      const cFrom = deathLowerBound(deaths, frame - win);
+      const cTo = deathLowerBound(deaths, frame + 1);
+      if (cTo > cFrom) {
+        // Greedy clustering on a running centroid — the window holds few deaths.
+        const clusters: { sx: number; sy: number; n: number; latest: number }[] = [];
+        for (let i = cFrom; i < cTo; i++) {
+          const x = deaths.x[i];
+          const y = deaths.y[i];
+          let hit = null;
+          for (const c of clusters) {
+            if (
+              Math.abs(c.sx / c.n - x) < COMBAT_CLUSTER_PX &&
+              Math.abs(c.sy / c.n - y) < COMBAT_CLUSTER_PX
+            ) {
+              hit = c;
+              break;
+            }
+          }
+          if (hit) {
+            hit.sx += x;
+            hit.sy += y;
+            hit.n++;
+            if (deaths.frame[i] > hit.latest) hit.latest = deaths.frame[i];
+          } else {
+            clusters.push({ sx: x, sy: y, n: 1, latest: deaths.frame[i] });
+          }
+        }
+        for (const c of clusters) {
+          if (c.n < 2) continue; // a stray death is not a battle
+          const cx = (c.sx / c.n) * sx;
+          const cy = (c.sy / c.n) * sy;
+          const fade = Math.max(0, 1 - (frame - c.latest) / win);
+          const pulse = 0.8 + 0.2 * Math.sin(frame / 5);
+          const rr = (13 + Math.min(24, c.n * 2)) * k;
+          ctx.strokeStyle = "#e25555";
+          ctx.lineWidth = 1.6;
+          ctx.globalAlpha = 0.55 * fade * pulse;
+          ctx.beginPath();
+          ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.globalAlpha = Math.min(1, 0.35 + 0.65 * fade);
+          ctx.fillStyle = "#e25555";
+          ctx.font = `700 ${Math.round(9.5 * k)}px var(--font-plex-mono), monospace`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(`✕${c.n}`, cx, cy - rr - 6 * k);
+        }
+        ctx.globalAlpha = 1;
+      }
     }
 
     // Minimap pings as expanding rings.
@@ -615,7 +725,7 @@ export function ReplayPlayer({
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
-  }, [data, resim, ownerColors]);
+  }, [data, resim, ownerColors, typeClasses]);
 
   useEffect(() => {
     drawRef.current = draw;
@@ -649,8 +759,10 @@ export function ReplayPlayer({
       const rows = new Map<string, HoverRow>();
       const add = (key: string, row: Omit<HoverRow, "count">) => {
         const hit = rows.get(key);
-        if (hit) hit.count++;
-        else rows.set(key, { ...row, count: 1 });
+        if (hit) {
+          hit.count++;
+          if (row.hpSum != null) hit.hpSum = (hit.hpSum ?? 0) + row.hpSum;
+        } else rows.set(key, { ...row, count: 1 });
       };
 
       // A structure below full HP is either going up or taking damage; the only
@@ -695,6 +807,7 @@ export function ReplayPlayer({
               label: `${name} — ${p?.name ?? owner?.name ?? "?"}`,
               color: p?.color ?? "#9aa8bb",
               rank: 0,
+              hpSum: hp,
             });
           }
         }
@@ -724,6 +837,12 @@ export function ReplayPlayer({
       resource(data.map.geysers, "Vespene geyser");
 
       if (rows.size === 0) return null;
+      // Group HP: the average across the stack, only shown when someone bleeds.
+      for (const row of rows.values()) {
+        if (row.hpSum == null || row.count === 0) continue;
+        const avg = Math.round(row.hpSum / row.count);
+        if (avg < 100) row.detail = `${avg}% vida`;
+      }
       const all = [...rows.values()].sort((a, b) => a.rank - b.rank || b.count - a.count);
       return {
         x: lx,
@@ -915,11 +1034,17 @@ export function ReplayPlayer({
     const windowF = 60 * FPS;
     for (const p of data.players) {
       const acts = data.actions[p.id] ?? [];
-      const apm = per.get(p.id)!.apm!;
+      const hks = data.hotkeys?.[p.id] ?? [];
+      const rec = per.get(p.id)!;
+      const apm = rec.apm!;
+      const hk = new Float64Array(BUCKETS);
+      rec.hk = hk;
       for (let b = 0; b < BUCKETS; b++) {
         const f = ((b + 1) / BUCKETS) * frames;
         const elapsed = Math.min(f, windowF) / FPS;
-        apm[b] = elapsed > 5 ? Math.round((countBetween(acts, f - windowF, f) * 60) / elapsed) : 0;
+        const total = countBetween(acts, f - windowF, f);
+        apm[b] = elapsed > 5 ? Math.round((total * 60) / elapsed) : 0;
+        hk[b] = total > 0 ? Math.round((1000 * countBetween(hks, f - windowF, f)) / total) / 10 : 0;
       }
     }
 
@@ -1166,6 +1291,19 @@ export function ReplayPlayer({
               })}
             </div>
           </div>
+        </div>
+
+        {/* Leyenda de figuras del tablero */}
+        <div className="font-data flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[10px] text-[var(--ink-faint)]">
+          <span>● bio</span>
+          <span>■ mech</span>
+          <span>▲ aéreo</span>
+          <span className="text-[var(--ink-ghost)]">·</span>
+          <span style={{ color: "#4da3ff" }}>◆ minerales</span>
+          <span style={{ color: "#58c26e" }}>⬡ gas</span>
+          <span className="text-[var(--ink-ghost)]">·</span>
+          <span>▪ edificio</span>
+          <span style={{ color: "#e25555" }}>◯✕n combate (bajas 10s)</span>
         </div>
 
         <Controls
@@ -1870,8 +2008,9 @@ function HistoryPanel({
           const v = get(p.id);
           if (v) for (let b = 0; b < BUCKETS; b++) sum[b] += v[b];
         }
-        // Rolling-window APM averages instead of summing into a fake number.
-        if (active === "apm" && roster.length > 0)
+        // Rolling-window ratios average across the roster instead of summing
+        // into a fake number.
+        if ((active === "apm" || active === "hk") && roster.length > 0)
           for (let b = 0; b < BUCKETS; b++) sum[b] = Math.round(sum[b] / roster.length);
         const mine = team === myTeam;
         out.push({

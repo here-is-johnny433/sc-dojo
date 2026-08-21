@@ -88,6 +88,23 @@ export function isWorkerType(info: ResimTypeInfo): boolean {
   return !info.building && WORKER_RE.test(info.name);
 }
 
+/** 0 = bio (orgánico terrestre) · 1 = mech (mecánico terrestre) · 2 = aire. */
+export type UnitClass = 0 | 1 | 2;
+
+const AIR_RE =
+  /wraith|dropship|battlecruiser|valkyrie|science vessel|scout|corsair|carrier|interceptor|arbiter|shuttle|observer|overlord|mutalisk|scourge|guardian|devourer|queen/i;
+const MECH_RE = /scv|probe|vulture|siege tank|goliath|dragoon|reaver/i;
+
+/**
+ * Shape class of a mobile unit on the replay board: air flies as a triangle,
+ * ground mech rolls as a square, everything organic walks as a circle.
+ */
+export function unitClass(info: ResimTypeInfo): UnitClass {
+  if (AIR_RE.test(info.name)) return 2;
+  if (MECH_RE.test(info.name)) return 1;
+  return 0;
+}
+
 /** "Protoss Dark Templar" → "Dark Templar". */
 export function shortUnitName(name: string): string {
   return name.replace(/^(Terran|Protoss|Zerg|Hero|Special) /, "");
