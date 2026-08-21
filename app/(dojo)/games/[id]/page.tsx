@@ -2,22 +2,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { gameDetail } from "@/lib/queries";
 import { requireUser } from "@/lib/session";
-import { fmtTime, WORKERS, RACE_LETTER } from "@/lib/bw";
+import { fmtTime, RACE_LETTER } from "@/lib/bw";
 import { MatchupTiles, RaceTile } from "@/components/RaceTile";
 import { ScorePanel } from "@/components/ScorePanel";
 import { ensurePlayerScores } from "@/lib/scores";
 
 export const dynamic = "force-dynamic";
-
-interface Ev {
-  player_id: number;
-  player_name: string;
-  frame: number;
-  seconds: number;
-  kind: string;
-  item: string;
-  supply_cost: number | null;
-}
 
 export default async function GamePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -25,16 +15,15 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
   const user = await requireUser();
   const detail = await gameDetail(id, user);
   if (!detail) notFound();
-  const { game, players, events, observations } = detail;
+  const { game, players, observations } = detail;
   // Espectro de rendimiento — computed on first visit, upgraded once the
   // re-simulation lands.
   const scores = await ensurePlayerScores(id).catch(() => []);
 
   // Perspectiva: la fila del espectador. Si no jugó, vista de observador.
   const me = players.find((p) => Number(p.user_id) === user.id);
-  const evs = events as Ev[];
 
-  // --- Build order columns (mine first, then allies, then opponents) ---
+  // Roster order: mine first, then allies, then opponents.
   const ordered = [...players].sort((a, b) => {
     const rank = (p: typeof a) => (p.player_id === me?.player_id ? 0 : p.team === me?.team ? 1 : 2);
     return rank(a) - rank(b) || a.player_id - b.player_id;
@@ -55,8 +44,6 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
         .join("+")}`
     : null;
 
-  const structural = (e: Ev) =>
-    e.kind !== "Train" || !WORKERS.has(e.item); // hide worker spam in the timeline
 
   return (
     <div className="space-y-5">
@@ -190,46 +177,6 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
         </section>
       )}
 
-      {/* Build orders */}
-      <section className="card p-5">
-        <h3 className="mb-4 text-[13px] font-semibold uppercase tracking-wider text-[var(--ink-dim)]">
-          Build orders <span className="normal-case text-[var(--ink-faint)]">(sin workers)</span>
-        </h3>
-        <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(ordered.length, 4)}, minmax(0, 1fr))` }}>
-          {ordered.map((p) => (
-            <div key={p.player_id} className="min-w-0">
-              <p className="mb-2 flex items-center gap-1.5 truncate text-[12px] font-medium">
-                <RaceTile letter={RACE_LETTER[p.race] ?? "?"} size={15} />
-                <span className={p.player_id === me?.player_id ? "text-[var(--psi)]" : ""}>
-                  {p.name}
-                </span>
-              </p>
-              <div className="font-data max-h-96 space-y-0.5 overflow-y-auto pr-1 text-[11px] leading-[1.8]">
-                {evs
-                  .filter((e) => e.player_id === p.player_id && structural(e))
-                  .map((e, i) => (
-                    <p key={i} className="flex gap-2 whitespace-nowrap">
-                      <span className="text-[var(--ink-ghost)]">{fmtTime(e.seconds)}</span>
-                      <span
-                        className="truncate"
-                        style={{
-                          color:
-                            e.kind === "Upgrade" || e.kind === "Tech"
-                              ? "var(--minerals)"
-                              : e.kind === "Build" || e.kind === "Building Morph"
-                                ? "var(--ink)"
-                                : "var(--ink-dim)",
-                        }}
-                      >
-                        {e.item}
-                      </span>
-                    </p>
-                  ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
     </div>
   );
 }
