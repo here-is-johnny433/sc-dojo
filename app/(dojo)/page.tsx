@@ -8,6 +8,7 @@ import {
   activeGoal,
   goalStreak,
   listPlayers,
+  userScoreHistory,
 } from "@/lib/queries";
 import { requireUser } from "@/lib/session";
 import { fmtTime } from "@/lib/bw";
@@ -15,6 +16,13 @@ import { MatchupTiles } from "@/components/RaceTile";
 import { FormStrip } from "@/components/FormStrip";
 import { PlayerSwitcher } from "@/components/PlayerSwitcher";
 import { ApmTrend, WinrateTrend } from "@/components/TrendCharts";
+import { ScoreTrend } from "@/components/ScoreTrend";
+import {
+  summarizeSpectrum,
+  toTrendPoints,
+  SpectrumTiles,
+  FocusBadge,
+} from "@/components/SpectrumSummary";
 
 export const dynamic = "force-dynamic";
 
@@ -30,14 +38,16 @@ export default async function Dashboard({
   // Las metas son privadas: solo se muestran al dueño (el admin ve todas).
   const showGoal = viewed.id === user.id || user.role === "admin";
 
-  const [stats, matchups, maps, trend, games, goal] = await Promise.all([
+  const [stats, matchups, maps, trend, games, goal, scoreHistory] = await Promise.all([
     overviewStats(viewed.id),
     matchupStats(viewed.id),
     mapStats(viewed.id),
     monthlyTrend(viewed.id),
     recentGames(viewed.id, 20),
     showGoal ? activeGoal(viewed.id) : null,
+    userScoreHistory(viewed.id),
   ]);
+  const spectrum = summarizeSpectrum(scoreHistory);
 
   const winrate =
     stats.decided > 0 ? Math.round((100 * stats.wins) / stats.decided) : null;
@@ -155,6 +165,23 @@ export default async function Dashboard({
           <Link href="/chat" className="btn btn-psi">
             Pedir diagnóstico
           </Link>
+        </section>
+      )}
+
+      {/* Espectro de rendimiento — el centro de aprendizaje */}
+      {scoreHistory.length > 0 && (
+        <section className="card p-5">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-[13px] font-semibold uppercase tracking-wider text-[var(--ink-dim)]">
+              Espectro de rendimiento{" "}
+              <span className="normal-case text-[var(--ink-faint)]">(0 = noob · 10 = pro)</span>
+            </h3>
+            <FocusBadge focus={spectrum.focus} />
+          </div>
+          <SpectrumTiles vars={spectrum.vars} />
+          <div className="mt-5 border-t border-[var(--grid-line)] pt-4">
+            <ScoreTrend data={toTrendPoints(scoreHistory)} />
+          </div>
         </section>
       )}
 

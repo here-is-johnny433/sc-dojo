@@ -149,6 +149,23 @@ export async function playerScoreHistory(name: string, limit = 200): Promise<Sco
   return r.rows;
 }
 
+/** Score evolution of one USER (all their aliases), oldest first. */
+export async function userScoreHistory(userId: number, limit = 200): Promise<ScoreHistoryRow[]> {
+  const r = await db().query(
+    `SELECT s.game_id, g.played_at, g.map_name, g.matchup, g.my_matchup, g.duration_seconds,
+            p.is_winner, p.race,
+            s.mechanics, s.economy, s.macro, s.combat, s.build, s.overall, s.with_resim
+     FROM player_scores s
+     JOIN game_players p ON p.game_id = s.game_id AND p.player_id = s.player_id
+     JOIN games g ON g.id = s.game_id
+     WHERE p.user_id = $1
+     ORDER BY g.played_at ASC NULLS LAST
+     LIMIT $2`,
+    [userId, limit]
+  );
+  return r.rows;
+}
+
 /** All player names seen across games, with how often — for the profile index. */
 export async function knownPlayers() {
   const r = await db().query(
