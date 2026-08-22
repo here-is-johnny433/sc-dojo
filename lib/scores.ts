@@ -226,7 +226,13 @@ function combatScores(
       continue;
     }
     const ratio = (opp + 50) / (own + 50); // smoothed so a flawless skirmish isn't ∞
-    const score = r1(Math.min(10, Math.max(0.5, 5.5 + 3 * Math.log2(ratio))));
+    // Softer slope (a 10 needs ~4-5× value traded, not 2.8×), capped below a
+    // perfect score, and shrunk toward neutral when little value changed hands
+    // — a won skirmish is evidence, not a pro grade.
+    const rawScore = 5.5 + 2.2 * Math.log2(ratio);
+    const volume = own + opp;
+    const confidence = volume / (volume + 800);
+    const score = r1(Math.min(9.8, Math.max(0.4, 5.5 + confidence * (rawScore - 5.5))));
     out.set(p.player_id, {
       score,
       raw: {
